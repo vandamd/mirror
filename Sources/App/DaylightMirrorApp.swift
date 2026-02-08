@@ -221,13 +221,28 @@ struct MirrorMenuView: View {
 
         Divider()
 
-        // Stop button
-        Button(action: { engine.stop() }) {
-            Text("Stop Mirror")
-                .frame(maxWidth: .infinity)
+        // Restart / Stop
+        HStack(spacing: 8) {
+            Button(action: {
+                engine.stop()
+                Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(0.5))
+                    await engine.start()
+                }
+            }) {
+                Text("Restart")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+
+            Button(action: { engine.stop() }) {
+                Text("Stop")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
         }
-        .buttonStyle(.bordered)
-        .controlSize(.small)
     }
 
     // MARK: - Starting View

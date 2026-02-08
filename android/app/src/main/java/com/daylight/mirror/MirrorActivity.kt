@@ -153,16 +153,13 @@ class MirrorActivity : Activity() {
     @Suppress("unused")
     fun setWarmth(value: Int) {
         val amberRate = (value.coerceIn(0, 255) * 1023) / 255
-        Thread {
+        runOnUiThread {
             try {
-                val process = Runtime.getRuntime().exec(arrayOf(
-                    "sh", "-c", "settings put system screen_brightness_amber_rate $amberRate"
-                ))
-                process.waitFor()
+                Settings.System.putInt(contentResolver, "screen_brightness_amber_rate", amberRate)
             } catch (e: Exception) {
                 android.util.Log.e("DaylightMirror", "Cannot set amber_rate: ${e.message}")
             }
-        }.start()
+        }
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {

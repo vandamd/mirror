@@ -829,6 +829,7 @@ class DisplayController {
         currentWarmth = max(0, min(255, value))
         tcpServer.sendCommand(CMD_WARMTH, value: UInt8(currentWarmth))
         onWarmthChanged?(currentWarmth)
+        print("[Display] Warmth -> \(currentWarmth)/255")
     }
 
     func toggleBacklight() {
