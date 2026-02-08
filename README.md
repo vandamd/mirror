@@ -4,9 +4,9 @@ Turn your [Daylight DC-1](https://daylightcomputer.com) into a real-time externa
 
 ![Daylight DC-1 mirroring a MacBook — both displays showing the same content](images/1-both-on.jpg)
 
-Your Mac renders natively at the Daylight's resolution. The mouse stays inside the 4:3 frame, windows tile to fit, and what you see on the Mac is exactly what appears on the Daylight — every pixel, every frame, with no perceptible delay.
+Your Mac renders natively at the Daylight's 4:3 resolution. What you see on the Mac is exactly what appears on the Daylight — every pixel, every frame, with no perceptible delay.
 
-The mirror runs at **30 frames per second** with **under 10 milliseconds of latency** and uses **less than 0.1 MB/s of bandwidth** over a single USB-C cable. It's lossless — no compression artifacts, no quality loss. Your Mac's GPU stays completely idle the entire time, so there's zero fan noise. This is as fast, as clean, and as efficient as a software display mirror can physically be.
+**30 FPS. Under 10ms latency. Lossless. Zero artifacts.** This is as fast, as clean, and as efficient as a software display mirror can physically be.
 
 ## Install
 
