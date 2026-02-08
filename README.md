@@ -88,6 +88,10 @@ The blog series tells the full story:
 - [Part 2: Killing the GPU](blog/part-2-killing-the-gpu.md) — zero-GPU pipeline, native Android renderer with ARM SIMD
 - [Part 3: One Click](blog/part-3-one-click.md) — virtual display, display controls, menu bar app
 
+## Support
+
+If you find this useful, you can [buy me a coffee on Gumroad](https://3200327913413.gumroad.com/l/daylight-mirror).
+
 ## License
 
 MIT

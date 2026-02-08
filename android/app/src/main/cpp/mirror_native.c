@@ -28,18 +28,18 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
-#define FRAME_W 1280
-#define FRAME_H 960
-#define PIXEL_COUNT (FRAME_W * FRAME_H)
-#define MAX_COMPRESSED (PIXEL_COUNT + 256)
+// Default resolution (updated dynamically via CMD_RESOLUTION from server)
+#define DEFAULT_FRAME_W 1024
+#define DEFAULT_FRAME_H 768
 
 // Protocol constants
 #define MAGIC_FRAME_0 0xDA
 #define MAGIC_FRAME_1 0x7E   // Frame packet: [DA 7E] [flags] [len:4] [payload]
-#define MAGIC_CMD_1   0x7F   // Command packet: [DA 7F] [cmd] [value]
+#define MAGIC_CMD_1   0x7F   // Command packet: [DA 7F] [cmd] [payload...]
 #define FLAG_KEYFRAME 0x01
 #define HEADER_SIZE 7
 #define CMD_BRIGHTNESS 0x01
+#define CMD_RESOLUTION 0x04
 
 // Global state
 static ANativeWindow *g_window = NULL;
@@ -50,7 +50,13 @@ static jobject g_activity = NULL;
 static char g_host[64] = "127.0.0.1";
 static int g_port = 8888;
 
-// Frame buffers (allocated once, reused)
+// Dynamic frame dimensions (set by CMD_RESOLUTION before first frame)
+static uint32_t g_frame_w = DEFAULT_FRAME_W;
+static uint32_t g_frame_h = DEFAULT_FRAME_H;
+static uint32_t g_pixel_count = DEFAULT_FRAME_W * DEFAULT_FRAME_H;
+static uint32_t g_max_compressed = DEFAULT_FRAME_W * DEFAULT_FRAME_H + 256;
+
+// Frame buffers (allocated once, reused — reallocated on resolution change)
 static uint8_t *g_current_frame = NULL;   // Decompressed greyscale pixels
 static uint8_t *g_compressed_buf = NULL;  // Incoming compressed data
 
@@ -93,13 +99,15 @@ static void blit_grey_to_surface(ANativeWindow *window, const uint8_t *grey) {
     uint8_t *dst = (uint8_t *)buffer.bits;
     int dst_stride = buffer.stride * 4;  // stride is in pixels, we need bytes
 
-    for (int y = 0; y < FRAME_H && y < buffer.height; y++) {
+    int fw = (int)g_frame_w;
+    int fh = (int)g_frame_h;
+    for (int y = 0; y < fh && y < buffer.height; y++) {
         uint8_t *row = dst + y * dst_stride;
-        const uint8_t *src = grey + y * FRAME_W;
+        const uint8_t *src = grey + y * fw;
         int x = 0;
 
         // NEON: process 16 greyscale pixels → 16 RGBX pixels (64 bytes output)
-        for (; x + 16 <= FRAME_W && x + 16 <= buffer.width; x += 16) {
+        for (; x + 16 <= fw && x + 16 <= buffer.width; x += 16) {
             uint8x16_t g = vld1q_u8(src + x);
             uint8x16_t ff = vdupq_n_u8(0xFF);
 
@@ -114,7 +122,7 @@ static void blit_grey_to_surface(ANativeWindow *window, const uint8_t *grey) {
         }
 
         // Remaining pixels
-        for (; x < FRAME_W && x < buffer.width; x++) {
+        for (; x < fw && x < buffer.width; x++) {
             uint8_t v = src[x];
             row[x * 4 + 0] = v;     // R
             row[x * 4 + 1] = v;     // G
@@ -131,10 +139,10 @@ static void *mirror_thread(void *arg) {
     (void)arg;
     LOGI("Mirror thread started, connecting to %s:%d", g_host, g_port);
 
-    // Allocate buffers
-    g_current_frame = (uint8_t *)calloc(PIXEL_COUNT, 1);
-    g_compressed_buf = (uint8_t *)malloc(MAX_COMPRESSED);
-    uint8_t *decompress_buf = (uint8_t *)malloc(PIXEL_COUNT);
+    // Allocate buffers at current resolution
+    g_current_frame = (uint8_t *)calloc(g_pixel_count, 1);
+    g_compressed_buf = (uint8_t *)malloc(g_max_compressed);
+    uint8_t *decompress_buf = (uint8_t *)malloc(g_pixel_count);
 
     if (!g_current_frame || !g_compressed_buf || !decompress_buf) {
         LOGE("Failed to allocate buffers");
@@ -169,6 +177,20 @@ static void *mirror_thread(void *arg) {
 
         LOGI("Connected to server");
 
+        // Notify Kotlin: connected
+        if (g_jvm && g_activity) {
+            JNIEnv *env;
+            int attached = 0;
+            if ((*g_jvm)->GetEnv(g_jvm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
+                (*g_jvm)->AttachCurrentThread(g_jvm, &env, NULL);
+                attached = 1;
+            }
+            jclass cls = (*env)->GetObjectClass(env, g_activity);
+            jmethodID mid = (*env)->GetMethodID(env, cls, "onConnectionState", "(Z)V");
+            if (mid) (*env)->CallVoidMethod(env, g_activity, mid, (jboolean)1);
+            if (attached) (*g_jvm)->DetachCurrentThread(g_jvm);
+        }
+
         int frame_count = 0;
         int stat_frames = 0;
         double recv_sum = 0, decomp_sum = 0, delta_sum = 0, blit_sum = 0;
@@ -192,10 +214,43 @@ static void *mirror_thread(void *arg) {
                 break;
             }
 
-            // Command packet: [DA 7F] [cmd] [value]
+            // Command packet: [DA 7F] [cmd] [payload...]
             if (magic[1] == MAGIC_CMD_1) {
-                uint8_t cmd_data[2];
-                if (read_exact(sock, cmd_data, 2) < 0) break;
+                uint8_t cmd;
+                if (read_exact(sock, &cmd, 1) < 0) break;
+
+                if (cmd == CMD_RESOLUTION) {
+                    // Resolution: [w:2 LE] [h:2 LE]
+                    uint8_t res_data[4];
+                    if (read_exact(sock, res_data, 4) < 0) break;
+                    uint32_t new_w = res_data[0] | (res_data[1] << 8);
+                    uint32_t new_h = res_data[2] | (res_data[3] << 8);
+                    if (new_w > 0 && new_h > 0 && new_w <= 4096 && new_h <= 4096) {
+                        g_frame_w = new_w;
+                        g_frame_h = new_h;
+                        g_pixel_count = new_w * new_h;
+                        g_max_compressed = g_pixel_count + 256;
+                        // Reallocate buffers
+                        free(g_current_frame);
+                        free(g_compressed_buf);
+                        free(decompress_buf);
+                        g_current_frame = (uint8_t *)calloc(g_pixel_count, 1);
+                        g_compressed_buf = (uint8_t *)malloc(g_max_compressed);
+                        decompress_buf = (uint8_t *)malloc(g_pixel_count);
+                        // Update window geometry
+                        if (g_window) {
+                            ANativeWindow_setBuffersGeometry(g_window, new_w, new_h,
+                                AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM);
+                        }
+                        LOGI("Resolution → %ux%u (%u pixels)", new_w, new_h, g_pixel_count);
+                    }
+                    continue;
+                }
+
+                // Other commands: [value:1]
+                uint8_t value;
+                if (read_exact(sock, &value, 1) < 0) break;
+
                 if (g_jvm && g_activity) {
                     JNIEnv *env;
                     int attached = 0;
@@ -204,14 +259,14 @@ static void *mirror_thread(void *arg) {
                         attached = 1;
                     }
                     jclass cls = (*env)->GetObjectClass(env, g_activity);
-                    if (cmd_data[0] == CMD_BRIGHTNESS) {
+                    if (cmd == CMD_BRIGHTNESS) {
                         jmethodID mid = (*env)->GetMethodID(env, cls, "setBrightness", "(I)V");
-                        if (mid) (*env)->CallVoidMethod(env, g_activity, mid, (jint)cmd_data[1]);
-                        LOGI("Brightness → %d/255", cmd_data[1]);
-                    } else if (cmd_data[0] == 0x02) {  // CMD_WARMTH
+                        if (mid) (*env)->CallVoidMethod(env, g_activity, mid, (jint)value);
+                        LOGI("Brightness → %d/255", value);
+                    } else if (cmd == 0x02) {  // CMD_WARMTH
                         jmethodID mid = (*env)->GetMethodID(env, cls, "setWarmth", "(I)V");
-                        if (mid) (*env)->CallVoidMethod(env, g_activity, mid, (jint)cmd_data[1]);
-                        LOGI("Warmth → %d/255", cmd_data[1]);
+                        if (mid) (*env)->CallVoidMethod(env, g_activity, mid, (jint)value);
+                        LOGI("Warmth → %d/255", value);
                     }
                     if (attached) (*g_jvm)->DetachCurrentThread(g_jvm);
                 }
@@ -234,7 +289,7 @@ static void *mirror_thread(void *arg) {
             uint8_t flags = frame_hdr[0];
             uint32_t payload_len = frame_hdr[1] | (frame_hdr[2] << 8) | (frame_hdr[3] << 16) | (frame_hdr[4] << 24);
 
-            if (payload_len > MAX_COMPRESSED) {
+            if (payload_len > g_max_compressed) {
                 LOGE("Payload too large: %u", payload_len);
                 break;
             }
@@ -251,21 +306,21 @@ static void *mirror_thread(void *arg) {
                 (const char *)g_compressed_buf,
                 (char *)decompress_buf,
                 payload_len,
-                PIXEL_COUNT
+                g_pixel_count
             );
             clock_gettime(CLOCK_MONOTONIC, &t2);
 
-            if (decompressed_size != PIXEL_COUNT) {
-                LOGE("LZ4 decompress failed: got %d, expected %d", decompressed_size, PIXEL_COUNT);
+            if (decompressed_size != (int)g_pixel_count) {
+                LOGE("LZ4 decompress failed: got %d, expected %u", decompressed_size, g_pixel_count);
                 if (flags & FLAG_KEYFRAME) break;
                 continue;
             }
 
             // Apply frame data
             if (flags & FLAG_KEYFRAME) {
-                memcpy(g_current_frame, decompress_buf, PIXEL_COUNT);
+                memcpy(g_current_frame, decompress_buf, g_pixel_count);
             } else {
-                apply_delta_neon(g_current_frame, decompress_buf, PIXEL_COUNT);
+                apply_delta_neon(g_current_frame, decompress_buf, g_pixel_count);
             }
             clock_gettime(CLOCK_MONOTONIC, &t3);
 
@@ -309,6 +364,27 @@ static void *mirror_thread(void *arg) {
 
         close(sock);
         LOGI("Disconnected, reconnecting in 1s...");
+
+        // Clear screen to white on disconnect (e-ink friendly)
+        if (g_window && g_current_frame) {
+            memset(g_current_frame, 0xFF, g_pixel_count);
+            blit_grey_to_surface(g_window, g_current_frame);
+        }
+
+        // Notify Kotlin: disconnected
+        if (g_jvm && g_activity) {
+            JNIEnv *env;
+            int attached = 0;
+            if ((*g_jvm)->GetEnv(g_jvm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
+                (*g_jvm)->AttachCurrentThread(g_jvm, &env, NULL);
+                attached = 1;
+            }
+            jclass cls = (*env)->GetObjectClass(env, g_activity);
+            jmethodID mid = (*env)->GetMethodID(env, cls, "onConnectionState", "(Z)V");
+            if (mid) (*env)->CallVoidMethod(env, g_activity, mid, (jboolean)0);
+            if (attached) (*g_jvm)->DetachCurrentThread(g_jvm);
+        }
+
         sleep(1);
     }
 
@@ -332,7 +408,7 @@ Java_com_daylight_mirror_MirrorActivity_nativeStart(
     g_activity = (*env)->NewGlobalRef(env, thiz);
 
     g_window = ANativeWindow_fromSurface(env, surface);
-    ANativeWindow_setBuffersGeometry(g_window, FRAME_W, FRAME_H, AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM);
+    ANativeWindow_setBuffersGeometry(g_window, g_frame_w, g_frame_h, AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM);
 
     const char *host_str = (*env)->GetStringUTFChars(env, host, NULL);
     strncpy(g_host, host_str, sizeof(g_host) - 1);
