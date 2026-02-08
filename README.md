@@ -80,13 +80,13 @@ What you see above is the Daylight rendering this README, mirrored from the Mac.
 
 ## How it works
 
-The technical deep-dive is in the blog series:
+This entire project was vibecoded in a single session with Claude Opus 4.6. Starting from "can I mirror my Mac to this tablet?", we iterated through VNC, Python scripts, browser-based streaming, and native rendering — each version dramatically faster than the last — until we hit the physical limits of what a software mirror can do. The result is 10x better than any existing solution for the DC-1: faster, sharper, lighter, and easier to use.
+
+The blog series tells the full story:
 
 - [Part 1: The Prototype](blog/) — from VNC to ScreenCaptureKit
 - [Part 2: Killing the GPU](blog/part-2-killing-the-gpu.md) — zero-GPU pipeline, native Android renderer with ARM SIMD
 - [Part 3: One Click](blog/part-3-one-click.md) — virtual display, display controls, menu bar app
-
-The short version: the Mac captures its own screen, converts to greyscale using CPU vector instructions, compresses the difference between consecutive frames, and sends ~4KB per frame over USB. The Daylight runs a native C renderer that decompresses and paints pixels directly to the display hardware. No browser, no GPU, no Java in the hot path. The entire round trip — capture, encode, transmit, decode, render — takes about 5 milliseconds.
 
 ## License
 
