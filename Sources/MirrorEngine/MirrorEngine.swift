@@ -858,9 +858,58 @@ class DisplayController {
     }
 }
 
+// MARK: - Update Checker
+
+/// Checks GitHub releases for a newer version on launch. Non-blocking, fire-and-forget.
+struct UpdateChecker {
+    static let repo = "welfvh/daylight-mirror"
+
+    struct Release {
+        let version: String
+        let url: String
+    }
+
+    static func check(currentVersion: String) async -> Release? {
+        guard let url = URL(string: "https://api.github.com/repos/\(repo)/releases/latest") else { return nil }
+        var request = URLRequest(url: url)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = 10
+
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse, http.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let tagName = json["tag_name"] as? String,
+              let htmlURL = json["html_url"] as? String else {
+            return nil
+        }
+
+        // Strip leading "v" for comparison (e.g. "v1.1.0" → "1.1.0")
+        let remoteVersion = tagName.hasPrefix("v") ? String(tagName.dropFirst()) : tagName
+        if isNewer(remote: remoteVersion, local: currentVersion) {
+            return Release(version: remoteVersion, url: htmlURL)
+        }
+        return nil
+    }
+
+    /// Simple semver comparison: returns true if remote > local
+    private static func isNewer(remote: String, local: String) -> Bool {
+        let r = remote.split(separator: ".").compactMap { Int($0) }
+        let l = local.split(separator: ".").compactMap { Int($0) }
+        for i in 0..<max(r.count, l.count) {
+            let rv = i < r.count ? r[i] : 0
+            let lv = i < l.count ? l[i] : 0
+            if rv > lv { return true }
+            if rv < lv { return false }
+        }
+        return false
+    }
+}
+
 // MARK: - Mirror Engine
 
 public class MirrorEngine: ObservableObject {
+    public static let appVersion = "1.0.0"
+
     @Published public var status: MirrorStatus = .idle
     @Published public var fps: Double = 0
     @Published public var bandwidth: Double = 0
@@ -870,6 +919,8 @@ public class MirrorEngine: ObservableObject {
     @Published public var adbConnected: Bool = false
     @Published public var clientCount: Int = 0
     @Published public var totalFrames: Int = 0
+    @Published public var updateVersion: String? = nil
+    @Published public var updateURL: String? = nil
     @Published public var resolution: DisplayResolution {
         didSet { UserDefaults.standard.set(resolution.rawValue, forKey: "resolution") }
     }
@@ -885,6 +936,15 @@ public class MirrorEngine: ObservableObject {
         let saved = UserDefaults.standard.string(forKey: "resolution") ?? ""
         self.resolution = DisplayResolution(rawValue: saved) ?? .comfortable
         NSLog("[MirrorEngine] init, resolution: %@", resolution.rawValue)
+
+        // Check for updates in the background
+        Task { @MainActor in
+            if let release = await UpdateChecker.check(currentVersion: Self.appVersion) {
+                self.updateVersion = release.version
+                self.updateURL = release.url
+                NSLog("[Update] New version available: %@", release.version)
+            }
+        }
     }
 
     private var globalKeyMonitor: Any?

@@ -59,14 +59,36 @@ Verify with `adb devices` — you should see your device listed.
 ## Usage
 
 1. Open **Daylight Mirror** from Spotlight
-2. Click **Start Mirror**
-3. On the Daylight, open the **Daylight Mirror** app
+2. Pick a resolution (Comfortable, Balanced, or Sharp)
+3. Click **Start Mirror** (or press `Ctrl+F8`)
+4. On the Daylight, open the **Daylight Mirror** app
 
 That's it. Your Mac switches to 4:3, and the Daylight lights up.
 
 ![Menu bar popover — live stats, brightness and warmth sliders, backlight toggle](images/2-menu-bar.jpg)
 
-The menu bar gives you brightness and warmth sliders, a backlight toggle, and live connection stats. Keyboard shortcuts work too: **Ctrl+F1/F2** for brightness, **Ctrl+F11/F12** for warmth, **Ctrl+F10** to toggle the backlight.
+### Resolution
+
+Three 4:3 presets, selectable before or during mirroring:
+
+| Preset | Resolution | Best for |
+|--------|-----------|----------|
+| Comfortable | 1024x768 | Larger UI, easy on the eyes |
+| Balanced | 1280x960 | Good balance of size and sharpness |
+| Sharp | 1600x1200 | Maximum sharpness, smaller UI |
+
+### Keyboard shortcuts
+
+All shortcuts use `Ctrl` + function keys:
+
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl+F8` | Start / stop mirroring |
+| `Ctrl+F1` / `Ctrl+F2` | Brightness down / up |
+| `Ctrl+F10` | Toggle backlight |
+| `Ctrl+F11` / `Ctrl+F12` | Warmth down / up |
+
+The menu bar also has brightness and warmth sliders, a backlight toggle, resolution picker, and live connection stats.
 
 Click **Stop Mirror** or quit the app — your Mac reverts to normal instantly.
 

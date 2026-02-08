@@ -55,6 +55,20 @@ struct MirrorMenuView: View {
                 statusBadge
             }
 
+            // Update banner
+            if let version = engine.updateVersion, let urlStr = engine.updateURL,
+               let url = URL(string: urlStr) {
+                Link(destination: url) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.down.circle")
+                        Text("v\(version) available")
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.blue)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+            }
+
             Divider()
 
             switch engine.status {
@@ -249,8 +263,6 @@ struct MirrorMenuView: View {
         }
         .toggleStyle(.switch)
         .controlSize(.small)
-
-        Divider()
 
         Divider()
 
