@@ -74,23 +74,29 @@ struct MirrorMenuView: View {
             }
 
             // Keyboard shortcuts reference
-            if engine.status == .running {
-                Divider()
+            Divider()
 
-                VStack(spacing: 4) {
-                    Text("Ctrl + Function Keys")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.tertiary)
+            VStack(spacing: 4) {
+                Text("Ctrl + Function Keys")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                if engine.status == .running {
                     HStack(spacing: 6) {
+                        shortcutPill("F8", label: "Mirror")
+                        Spacer()
                         shortcutGroup("F1", "F2", label: "Brightness")
                         Spacer()
-                        shortcutPill("F10", label: "Toggle Backlight")
+                        shortcutPill("F10", label: "Backlight")
                         Spacer()
                         shortcutGroup("F11", "F12", label: "Warmth")
                     }
+                } else {
+                    HStack {
+                        shortcutPill("F8", label: "Start Mirror")
+                    }
                 }
-                .padding(.vertical, 2)
             }
+            .padding(.vertical, 2)
 
             Divider()
 
