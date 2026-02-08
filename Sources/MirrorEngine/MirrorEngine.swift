@@ -820,14 +820,20 @@ class DisplayController {
 
     func adjustWarmth(by delta: Int) {
         currentWarmth = max(0, min(255, currentWarmth + delta))
-        tcpServer.sendCommand(CMD_WARMTH, value: UInt8(currentWarmth))
+        // Warmth goes via adb shell — screen_brightness_amber_rate is a Daylight-protected
+        // setting that only the shell user can write, not a regular Android app.
+        DispatchQueue.global().async { [warmth = currentWarmth] in
+            ADBBridge.setSystemSetting("screen_brightness_amber_rate", value: warmth)
+        }
         onWarmthChanged?(currentWarmth)
         print("[Display] Warmth -> \(currentWarmth)/255")
     }
 
     func setWarmth(_ value: Int) {
         currentWarmth = max(0, min(255, value))
-        tcpServer.sendCommand(CMD_WARMTH, value: UInt8(currentWarmth))
+        DispatchQueue.global().async { [warmth = currentWarmth] in
+            ADBBridge.setSystemSetting("screen_brightness_amber_rate", value: warmth)
+        }
         onWarmthChanged?(currentWarmth)
         print("[Display] Warmth -> \(currentWarmth)/255")
     }
