@@ -1,6 +1,10 @@
 // Daylight Mirror — ScreenCaptureKit + WebSocket for low-latency screen mirroring.
-// Captures a Mac display via ScreenCaptureKit, JPEG-encodes with CIContext (GPU),
-// serves via a minimal WebSocket server. Daylight DC-1 connects over USB.
+// Captures a Mac display via ScreenCaptureKit, converts to greyscale via CIFilter (GPU),
+// JPEG-encodes with CIContext (GPU), streams via WebSocket. Daylight DC-1 over USB.
+//
+// Pipeline: ScreenCaptureKit BGRA → CIColorControls desaturate → greyscale JPEG → WebSocket
+// Greyscale JPEG: ~180KB/frame at q0.8 → ~5MB/s bandwidth (fits USB 2.0 easily).
+// Raw greyscale was pixel-perfect but 1.2MB/frame × 30fps = 36MB/s overwhelmed USB.
 
 import Foundation
 import ScreenCaptureKit
@@ -11,7 +15,7 @@ import Network
 // MARK: - Configuration
 
 let PORT: UInt16 = 8888
-let JPEG_QUALITY: CGFloat = 0.5
+let JPEG_QUALITY: CGFloat = 0.8
 let TARGET_FPS: Int = 30
 
 // MARK: - WebSocket Server (NWListener based, no dependencies)
@@ -59,8 +63,6 @@ class WebSocketServer {
             self.connections.append(conn)
             self.lock.unlock()
 
-            // Also serve the HTML page on the initial HTTP request
-            // (NWListener with WebSocket will auto-upgrade WS connections)
             self.receiveLoop(conn)
         }
 
@@ -70,7 +72,6 @@ class WebSocketServer {
     func receiveLoop(_ conn: NWConnection) {
         conn.receiveMessage { [weak self] content, context, isComplete, error in
             if error != nil { return }
-            // Keep receiving (client might send pings etc)
             self?.receiveLoop(conn)
         }
     }
@@ -94,7 +95,7 @@ class WebSocketServer {
     }
 }
 
-// MARK: - HTTP Server for the HTML page (separate from WebSocket)
+// MARK: - HTTP Server for the viewer page (separate from WebSocket)
 
 class HTTPServer {
     let listener: NWListener
@@ -105,12 +106,14 @@ class HTTPServer {
         let params = NWParameters.tcp
         listener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: port)!)
 
+        // Greyscale JPEG viewer. Uses createImageBitmap for off-main-thread decode.
+        // requestAnimationFrame loop renders only the latest frame (drops stale ones).
         let html = """
         <!DOCTYPE html><html>
         <head><meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
         <style>*{margin:0;padding:0;overflow:hidden}
         body{background:#000;width:100vw;height:100vh;touch-action:none}
-        canvas{width:100vw;height:100vh;display:block}</style></head>
+        canvas{width:100vw;height:100vh;display:block;image-rendering:pixelated}</style></head>
         <body><canvas id="c"></canvas><script>
         const canvas=document.getElementById('c');
         const ctx=canvas.getContext('2d');
@@ -118,12 +121,27 @@ class HTTPServer {
 
         const ws=new WebSocket('ws://localhost:\(PORT)');
         ws.binaryType='arraybuffer';
+
+        let latestFrame=null;
+        let pending=false;
+
         ws.onmessage=async(e)=>{
+          // Decode JPEG off main thread, store as latest frame (drop old ones)
           const blob=new Blob([e.data],{type:'image/jpeg'});
           const bmp=await createImageBitmap(blob);
-          ctx.drawImage(bmp,0,0,canvas.width,canvas.height);
-          bmp.close();
+          if(latestFrame)latestFrame.close();
+          latestFrame=bmp;
+          if(!pending){pending=true;requestAnimationFrame(render);}
         };
+
+        function render(){
+          if(latestFrame){
+            ctx.drawImage(latestFrame,0,0,canvas.width,canvas.height);
+            latestFrame.close();
+            latestFrame=null;
+          }
+          pending=false;
+        }
 
         document.body.addEventListener('click',()=>{
           document.documentElement.requestFullscreen().catch(()=>{});
@@ -155,7 +173,6 @@ class HTTPServer {
                 return
             }
 
-            // Simple HTTP response regardless of request
             let request = String(data: data, encoding: .utf8) ?? ""
             if request.contains("GET") {
                 let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: \(self.htmlPage.count)\r\nConnection: close\r\n\r\n"
@@ -178,9 +195,7 @@ class ScreenCapture: NSObject, SCStreamOutput {
     let ciContext: CIContext
     var stream: SCStream?
     var frameCount: Int = 0
-    var startTime: Date = Date()
     var lastStatTime: Date = Date()
-    var captureTimeSum: Double = 0
     var encodeTimeSum: Double = 0
     var statFrames: Int = 0
 
@@ -194,10 +209,8 @@ class ScreenCapture: NSObject, SCStreamOutput {
     func start() async throws {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
 
-        // Find the virtual "Daylight" display (1280x960 non-HiDPI)
-        // It should be the one with ~1280 width
+        // Find the virtual "Daylight" display (1280x960 non-HiDPI mirror)
         guard let display = content.displays.first(where: {
-            // Match the virtual display by resolution
             $0.width == 1280 || $0.width == 1600
         }) ?? content.displays.first else {
             print("No display found!")
@@ -221,9 +234,8 @@ class ScreenCapture: NSObject, SCStreamOutput {
         try stream!.addStreamOutput(self, type: .screen, sampleHandlerQueue: captureQueue)
         try await stream!.startCapture()
 
-        startTime = Date()
         lastStatTime = Date()
-        print("Capture started at \(TARGET_FPS)fps")
+        print("Capture started at \(TARGET_FPS)fps — greyscale JPEG")
     }
 
     // SCStreamOutput delegate — called for each captured frame
@@ -232,34 +244,33 @@ class ScreenCapture: NSObject, SCStreamOutput {
         guard type == .screen, sampleBuffer.isValid,
               let pixelBuffer = sampleBuffer.imageBuffer else { return }
 
-        let captureTime = CACurrentMediaTime()
+        let t0 = CACurrentMediaTime()
 
-        // GPU-accelerated JPEG encode
+        // GPU pipeline: BGRA → desaturate (greyscale) → JPEG encode
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        let grayImage = ciImage.applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 0.0])
         guard let jpegData = ciContext.jpegRepresentation(
-            of: ciImage,
+            of: grayImage,
             colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!,
             options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: JPEG_QUALITY]
         ) else { return }
 
-        let encodeTime = CACurrentMediaTime()
+        let t1 = CACurrentMediaTime()
 
-        // Broadcast to all connected WebSocket clients
         wsServer.broadcast(jpegData)
 
         frameCount += 1
         statFrames += 1
-        captureTimeSum += 0 // Can't measure capture time separately
-        encodeTimeSum += (encodeTime - captureTime) * 1000
+        encodeTimeSum += (t1 - t0) * 1000
 
-        // Print stats every 5 seconds
+        // Stats every 5 seconds
         let now = Date()
         if now.timeIntervalSince(lastStatTime) >= 5.0 {
             let fps = Double(statFrames) / now.timeIntervalSince(lastStatTime)
             let avgEncode = statFrames > 0 ? encodeTimeSum / Double(statFrames) : 0
-            let avgSize = jpegData.count
-            print(String(format: "FPS: %.1f | encode: %.1fms | frame: %dKB | total: %d frames",
-                         fps, avgEncode, avgSize / 1024, frameCount))
+            let bw = Double(jpegData.count) * fps / 1024 / 1024
+            print(String(format: "FPS: %.1f | encode: %.1fms | frame: %dKB | ~%.1fMB/s | total: %d",
+                         fps, avgEncode, jpegData.count / 1024, bw, frameCount))
             statFrames = 0
             encodeTimeSum = 0
             lastStatTime = now
@@ -268,6 +279,8 @@ class ScreenCapture: NSObject, SCStreamOutput {
 }
 
 // MARK: - Main
+
+setbuf(stdout, nil)
 
 let wsServer = try WebSocketServer(port: PORT)
 wsServer.start()
@@ -285,9 +298,8 @@ Task {
     }
 }
 
-print("Daylight Mirror v2 — ScreenCaptureKit + WebSocket")
+print("Daylight Mirror v3 — greyscale JPEG, rAF frame dropping")
 print("HTML page: http://localhost:\(PORT + 1)")
 print("WebSocket: ws://localhost:\(PORT)")
 
-// Keep running
 RunLoop.main.run()
