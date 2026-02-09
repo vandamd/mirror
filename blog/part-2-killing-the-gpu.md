@@ -251,3 +251,7 @@ The software works. The display pipeline is essentially solved — sub-10ms late
 ---
 
 *The code is at [github.com/welfvh/daylight-mirror](https://github.com/welfvh/daylight-mirror). The Daylight DC-1 is made by [Daylight Computer](https://daylightcomputer.com).*
+
+---
+
+**Previous:** [Part 1: The Prototype](part-1-from-vnc-to-raw-pixels.md) — from VNC to ScreenCaptureKit | **Next:** [Part 3: One Click](part-3-one-click.md) — virtual display, display controls, menu bar app

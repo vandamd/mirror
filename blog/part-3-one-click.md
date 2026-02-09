@@ -261,3 +261,7 @@ The streaming pipeline hasn't changed since Part 2 — it didn't need to. What c
 ---
 
 *The code is at [github.com/welfvh/daylight-mirror](https://github.com/welfvh/daylight-mirror). The Daylight DC-1 is made by [Daylight Computer](https://daylightcomputer.com).*
+
+---
+
+**Previous:** [Part 2: Killing the GPU](part-2-killing-the-gpu.md) — zero-GPU pipeline, native Android renderer with ARM SIMD

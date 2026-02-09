@@ -130,7 +130,7 @@ This entire project was vibecoded in a single session with Claude Opus 4.6. Star
 
 The blog series tells the full story:
 
-- [Part 1: The Prototype](blog/) — from VNC to ScreenCaptureKit
+- [Part 1: The Prototype](blog/part-1-from-vnc-to-raw-pixels.md) — from VNC to ScreenCaptureKit
 - [Part 2: Killing the GPU](blog/part-2-killing-the-gpu.md) — zero-GPU pipeline, native Android renderer with ARM SIMD
 - [Part 3: One Click](blog/part-3-one-click.md) — virtual display, display controls, menu bar app
 

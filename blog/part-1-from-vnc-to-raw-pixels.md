@@ -1,3 +1,5 @@
+> **Note:** What we ended up building is very different from where we started. That's part of what makes this story interesting — Claude worked through many different approaches, hit dead ends, and navigated an incredibly wide stack of meaningfully difficult concepts and toolings to arrive at the final solution.
+
 # Turning a Daylight DC-1 Into a Mac External Display: From VNC to Raw Pixels
 
 *Part 1 of a series on building a low-latency screen mirror from scratch.*
@@ -227,3 +229,7 @@ But that's Part 2.
 ---
 
 *The code is at [github.com/welfvh/daylight-mirror](https://github.com/welfvh/daylight-mirror). The Daylight DC-1 is made by [Daylight Computer](https://daylightcomputer.com).*
+
+---
+
+**Next:** [Part 2: Killing the GPU](part-2-killing-the-gpu.md) — zero-GPU pipeline, native Android renderer with ARM SIMD
