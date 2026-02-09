@@ -59,7 +59,6 @@ make deploy     # Android APK → Daylight (requires Android SDK)
 **On your Mac:**
 - macOS 14 or later
 - `adb`: `brew install android-platform-tools`
-- macOS will prompt for Accessibility and Screen Recording permissions on first run
 
 **On your Daylight DC-1** (one-time setup):
 1. **Settings** > **About tablet** > tap **Build number** seven times
@@ -67,6 +66,19 @@ make deploy     # Android APK → Daylight (requires Android SDK)
 3. Connect to your Mac via USB-C and tap **Allow** on the prompt
 
 Verify with `adb devices` — you should see your device listed.
+
+### First run — macOS permissions
+
+On first launch, macOS needs two permissions. The app will guide you through this:
+
+1. **Screen Recording** — required to capture your display. The app will open System Settings automatically. Toggle "Daylight Mirror" on, then quit and reopen the app.
+2. **Accessibility** — required for keyboard shortcuts (`Ctrl+F8`, etc.). Same flow: toggle on in System Settings, then reopen.
+
+> If macOS says the app "is damaged and can't be opened", run this in Terminal:
+> ```bash
+> xattr -cr /Applications/Daylight\ Mirror.app
+> ```
+> This clears the download quarantine flag. The app is open source — you can verify the code yourself.
 
 ## Usage
 

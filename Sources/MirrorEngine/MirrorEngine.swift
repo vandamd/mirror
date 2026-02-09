@@ -1045,9 +1045,29 @@ public class MirrorEngine: ObservableObject {
         }
     }
 
+    /// Check if Screen Recording permission is granted. On macOS 14+, attempting
+    /// SCShareableContent without permission throws an error rather than crashing,
+    /// but we can also pre-check via CGPreflightScreenCaptureAccess.
+    public static func hasScreenRecordingPermission() -> Bool {
+        return CGPreflightScreenCaptureAccess()
+    }
+
+    /// Prompt the user for Screen Recording permission (opens System Settings).
+    public static func requestScreenRecordingPermission() {
+        CGRequestScreenCaptureAccess()
+    }
+
     @MainActor
     public func start() async {
         guard status == .idle || status != .starting else { return }
+
+        // Check Screen Recording permission before attempting capture
+        if !Self.hasScreenRecordingPermission() {
+            Self.requestScreenRecordingPermission()
+            status = .error("Grant Screen Recording permission in System Settings, then retry")
+            return
+        }
+
         status = .starting
 
         // 1. ADB — optional (mirror works over WiFi too)
