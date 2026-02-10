@@ -74,16 +74,10 @@ On first launch, macOS needs two permissions. The app will guide you through thi
 1. **Screen Recording** — required to capture your display. The app will open System Settings automatically. Toggle "Daylight Mirror" on, then quit and reopen the app.
 2. **Accessibility** — required for keyboard shortcuts (`Ctrl+F8`, etc.). Same flow: toggle on in System Settings, then reopen.
 
-> If macOS says the app "is damaged and can't be opened", run this in Terminal:
-> ```bash
-> xattr -cr /Applications/Daylight\ Mirror.app
-> ```
-> This clears the download quarantine flag. The app is open source — you can verify the code yourself.
-
 ## Usage
 
 1. Open **Daylight Mirror** from Spotlight
-2. Pick a resolution (Comfortable, Balanced, or Sharp)
+2. Pick a resolution (Cozy, Comfortable, Balanced, or Sharp)
 3. Click **Start Mirror** (or press `Ctrl+F8`)
 4. On the Daylight, open the **Daylight Mirror** app
 
@@ -93,13 +87,14 @@ That's it. Your Mac switches to 4:3, and the Daylight lights up.
 
 ### Resolution
 
-Three 4:3 presets, selectable before or during mirroring:
+Four 4:3 presets, selectable before or during mirroring:
 
 | Preset | Resolution | Best for |
 |--------|-----------|----------|
+| Cozy | 800x600 HiDPI | Big UI, native sharpness (2x backing → 1600x1200 pixels) |
 | Comfortable | 1024x768 | Larger UI, easy on the eyes |
 | Balanced | 1280x960 | Good balance of size and sharpness |
-| Sharp | 1600x1200 | Maximum sharpness, smaller UI |
+| Sharp | 1600x1200 | Maximum sharpness, smallest UI |
 
 ### Keyboard shortcuts
 
@@ -130,7 +125,8 @@ daylight-mirror brightness           # get current brightness
 daylight-mirror brightness 200       # set brightness (0-255)
 daylight-mirror warmth 128           # set warmth / amber rate (0-255)
 daylight-mirror backlight toggle     # toggle backlight (on|off|toggle)
-daylight-mirror resolution sharp     # set resolution (comfortable|balanced|sharp)
+daylight-mirror resolution sharp     # set resolution (cozy|comfortable|balanced|sharp)
+daylight-mirror sharpen 0.8          # set sharpening amount (0.0-1.5)
 daylight-mirror restart              # full stop + start cycle
 ```
 
