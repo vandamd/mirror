@@ -116,6 +116,26 @@ The menu bar also has brightness and warmth sliders, a backlight toggle, resolut
 
 Click **Stop Mirror** or quit the app — your Mac reverts to normal instantly.
 
+### CLI
+
+Every feature in the menu bar app is available from the command line. The CLI talks to whatever engine is running (GUI app or CLI daemon) via Unix domain socket — one engine, two interfaces.
+
+```bash
+daylight-mirror start                # start mirroring (tells GUI app, or spawns daemon)
+daylight-mirror stop                 # stop mirroring
+daylight-mirror status               # current state (machine-readable)
+daylight-mirror reconnect            # re-establish ADB tunnel
+
+daylight-mirror brightness           # get current brightness
+daylight-mirror brightness 200       # set brightness (0-255)
+daylight-mirror warmth 128           # set warmth / amber rate (0-255)
+daylight-mirror backlight toggle     # toggle backlight (on|off|toggle)
+daylight-mirror resolution sharp     # set resolution (comfortable|balanced|sharp)
+daylight-mirror restart              # full stop + start cycle
+```
+
+This means any script or tool (including AI agents) can control the Daylight programmatically.
+
 ## Fidelity
 
 ![Close-up of the Daylight displaying the GitHub README — pixel-perfect text](images/3-fidelity.jpg)
