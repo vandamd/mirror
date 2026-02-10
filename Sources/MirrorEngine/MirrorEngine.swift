@@ -28,14 +28,15 @@ let KEYFRAME_INTERVAL: Int = 30
 
 // Resolution presets (all 4:3, matching Daylight DC-1 aspect ratio)
 public enum DisplayResolution: String, CaseIterable, Identifiable {
+    case cozy        = "800x600"    // Extra large UI, maximum readability
     case comfortable = "1024x768"   // Larger UI, easy on the eyes
     case balanced    = "1280x960"   // Good balance of size and sharpness
     case sharp       = "1600x1200"  // Maximum sharpness, smaller UI
 
     public var id: String { rawValue }
-    public var width: UInt { switch self { case .comfortable: 1024; case .balanced: 1280; case .sharp: 1600 } }
-    public var height: UInt { switch self { case .comfortable: 768; case .balanced: 960; case .sharp: 1200 } }
-    public var label: String { switch self { case .comfortable: "Comfortable"; case .balanced: "Balanced"; case .sharp: "Sharp" } }
+    public var width: UInt { switch self { case .cozy: 800; case .comfortable: 1024; case .balanced: 1280; case .sharp: 1600 } }
+    public var height: UInt { switch self { case .cozy: 600; case .comfortable: 768; case .balanced: 960; case .sharp: 1200 } }
+    public var label: String { switch self { case .cozy: "Cozy"; case .comfortable: "Comfortable"; case .balanced: "Balanced"; case .sharp: "Sharp" } }
 }
 
 // Protocol constants
