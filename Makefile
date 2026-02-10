@@ -33,19 +33,11 @@ android:
 install: mac
 	@echo "Installing $(APP_NAME)..."
 	@mkdir -p "$(APP_BUNDLE)/Contents/MacOS"
+	@mkdir -p "$(APP_BUNDLE)/Contents/Resources"
 	@cp $(BINARY) "$(APP_BUNDLE)/Contents/MacOS/DaylightMirror"
-	@/usr/libexec/PlistBuddy -c "Clear dict" "$(APP_BUNDLE)/Contents/Info.plist" 2>/dev/null || true
-	@/usr/libexec/PlistBuddy \
-		-c "Add :CFBundleName string 'Daylight Mirror'" \
-		-c "Add :CFBundleDisplayName string 'Daylight Mirror'" \
-		-c "Add :CFBundleIdentifier string 'com.daylight.mirror'" \
-		-c "Add :CFBundleVersion string '1.0'" \
-		-c "Add :CFBundleShortVersionString string '1.0'" \
-		-c "Add :CFBundleExecutable string 'DaylightMirror'" \
-		-c "Add :CFBundlePackageType string 'APPL'" \
-		-c "Add :LSUIElement bool true" \
-		-c "Add :LSMinimumSystemVersion string '14.0'" \
-		"$(APP_BUNDLE)/Contents/Info.plist"
+	@cp Info.plist "$(APP_BUNDLE)/Contents/Info.plist"
+	@cp Resources/AppIcon.icns "$(APP_BUNDLE)/Contents/Resources/AppIcon.icns"
+	@codesign --force --deep -s - "$(APP_BUNDLE)"
 	@echo "Installed: $(APP_BUNDLE)"
 	@echo "Open from Spotlight or: open \"$(APP_BUNDLE)\""
 
