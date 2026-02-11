@@ -68,7 +68,8 @@ func readRunningPID() -> pid_t? {
 
 /// Write a machine-readable status file that `status` can read.
 func writeStatusFile(status: String, resolution: String, fps: Double,
-                     bandwidth: Double, clients: Int, totalFrames: Int, adb: Bool) {
+                     bandwidth: Double, clients: Int, totalFrames: Int, adb: Bool,
+                     jitterMs: Double = 0, rttMs: Double = 0, rttP95Ms: Double = 0) {
     let lines = [
         "status=\(status)",
         "resolution=\(resolution)",
@@ -77,6 +78,9 @@ func writeStatusFile(status: String, resolution: String, fps: Double,
         "clients=\(clients)",
         "total_frames=\(totalFrames)",
         "adb=\(adb)",
+        "jitter_ms=\(String(format: "%.1f", jitterMs))",
+        "rtt_avg_ms=\(String(format: "%.1f", rttMs))",
+        "rtt_p95_ms=\(String(format: "%.1f", rttP95Ms))",
         "pid=\(ProcessInfo.processInfo.processIdentifier)",
         "updated=\(ISO8601DateFormatter().string(from: Date()))"
     ]
@@ -168,15 +172,16 @@ func commandStart() {
 
     let engine = MirrorEngine()
 
-    // Track state for the status file
     var currentFPS: Double = 0
     var currentBW: Double = 0
     var currentClients: Int = 0
     var currentTotalFrames: Int = 0
     var currentADB: Bool = false
     var currentStatus: String = "starting"
+    var currentJitter: Double = 0
+    var currentRTT: Double = 0
+    var currentRTTP95: Double = 0
 
-    // Periodic status file writer (every 5 seconds)
     let statusTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
     statusTimer.schedule(deadline: .now() + 1, repeating: 5.0)
     statusTimer.setEventHandler {
@@ -187,7 +192,10 @@ func commandStart() {
             bandwidth: currentBW,
             clients: currentClients,
             totalFrames: currentTotalFrames,
-            adb: currentADB
+            adb: currentADB,
+            jitterMs: currentJitter,
+            rttMs: currentRTT,
+            rttP95Ms: currentRTTP95
         )
     }
     statusTimer.resume()
@@ -242,6 +250,9 @@ func commandStart() {
                 currentClients = engine.clientCount
                 currentTotalFrames = engine.totalFrames
                 currentADB = engine.adbConnected
+                currentJitter = engine.jitterMs
+                currentRTT = engine.rttMs
+                currentRTTP95 = engine.rttP95Ms
 
                 switch engine.status {
                 case .idle: currentStatus = "idle"
@@ -443,6 +454,79 @@ func commandFontSmoothing() {
     }
 }
 
+/// `daylight-mirror latency` — print latency diagnostics. With `--watch`, polls every 2s.
+func commandLatency() {
+    let watch = args.contains("--watch") || args.contains("-w")
+
+    func printLatency() {
+        guard controlSocketExists() else {
+            print("ERROR: Daylight Mirror is not running.")
+            exit(1)
+        }
+        guard let response = sendControlCommand("LATENCY") else {
+            print("ERROR: Could not connect to control socket.")
+            exit(1)
+        }
+        if response.hasPrefix("ERR") {
+            print(response)
+            exit(1)
+        }
+        let lines = response.split(separator: "\n").dropFirst()
+        var vals: [String: String] = [:]
+        for line in lines {
+            let kv = line.split(separator: "=", maxSplits: 1)
+            if kv.count == 2 { vals[String(kv[0])] = String(kv[1]) }
+        }
+
+        let fps = vals["fps"] ?? "?"
+        let grey = vals["grey_ms"] ?? "?"
+        let compress = vals["compress_ms"] ?? "?"
+        let jitter = vals["jitter_ms"] ?? "?"
+        let rttAvg = vals["rtt_avg_ms"] ?? "?"
+        let rttP95 = vals["rtt_p95_ms"] ?? "?"
+        let clients = vals["clients"] ?? "?"
+        let frames = vals["total_frames"] ?? "?"
+
+        if watch {
+            print("\u{1B}[2J\u{1B}[H", terminator: "")
+        }
+        print("Daylight Mirror — Latency Diagnostics")
+        print("======================================")
+        print("FPS:              \(fps)")
+        print("Clients:          \(clients)")
+        print("Total frames:     \(frames)")
+        print("")
+        print("Mac processing:")
+        print("  Greyscale:      \(grey) ms")
+        print("  LZ4 compress:   \(compress) ms")
+        print("  Jitter:         \(jitter) ms")
+        print("")
+        print("Round-trip (Mac → Daylight → Mac):")
+        print("  Average:        \(rttAvg) ms")
+        print("  P95:            \(rttP95) ms")
+        print("")
+        if rttAvg != "?" && rttAvg != "0.0" {
+            if let avg = Double(rttAvg) {
+                print("Est. one-way:     ~\(String(format: "%.1f", avg / 2.0)) ms")
+            }
+        } else {
+            print("(Waiting for ACKs from Daylight — is the Android app updated?)")
+        }
+    }
+
+    if watch {
+        printLatency()
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 2, repeating: 2.0)
+        timer.setEventHandler { printLatency() }
+        timer.resume()
+        RunLoop.main.run()
+    } else {
+        printLatency()
+        exit(0)
+    }
+}
+
 /// Print usage information.
 func printUsage() {
     print("Daylight Mirror v\(MirrorEngine.appVersion) -- CLI")
@@ -462,6 +546,8 @@ func printUsage() {
     print("  sharpen [0.0-3.0]        Get or set sharpening (0=none, 1=mild, 2=strong)")
     print("  contrast [1.0-2.0]       Get or set contrast (1.0=off, 1.5=moderate, 2.0=high)")
     print("  fontsmoothing [on|off]   Get or set macOS font smoothing (off = crisper text)")
+    print("  latency                  Print latency diagnostics (RTT, jitter, processing times)")
+    print("  latency --watch          Continuously poll latency stats every 2 seconds")
     print("  restart                  Full stop + start cycle")
     print("")
     print("The `start` command keeps the process alive. Stop it with Ctrl+C or `daylight-mirror stop`.")
@@ -498,6 +584,8 @@ case "contrast":
     commandContrast()
 case "fontsmoothing":
     commandFontSmoothing()
+case "latency":
+    commandLatency()
 case "-h", "--help", "help":
     printUsage()
     exit(0)

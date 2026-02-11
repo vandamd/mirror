@@ -6,6 +6,17 @@
 
 import Foundation
 import Network
+import QuartzCore
+
+struct LatencyStats {
+    var rttMs: Double = 0
+    var rttMinMs: Double = 0
+    var rttMaxMs: Double = 0
+    var rttAvgMs: Double = 0
+    var rttP95Ms: Double = 0
+    var acksReceived: Int = 0
+    var ackRate: Double = 0
+}
 
 class TCPServer {
     let listener: NWListener
@@ -14,12 +25,20 @@ class TCPServer {
     let lock = NSLock()
     var lastKeyframeData: Data?
     var onClientCountChanged: ((Int) -> Void)?
+    var onLatencyStats: ((LatencyStats) -> Void)?
     var frameWidth: UInt16 = 1024 {
         didSet { lock.lock(); lastKeyframeData = nil; lock.unlock() }
     }
     var frameHeight: UInt16 = 768 {
         didSet { lock.lock(); lastKeyframeData = nil; lock.unlock() }
     }
+
+    private var sendTimestamps: [UInt32: Double] = [:]
+    private let rttLock = NSLock()
+    private var rttSamples: [Double] = []
+    private let rttWindowSize = 150
+    private var totalAcks: Int = 0
+    private var lastAckStatsTime: Double = CACurrentMediaTime()
 
     init(port: UInt16) throws {
         let params = NWParameters.tcp
@@ -85,26 +104,107 @@ class TCPServer {
     }
 
     func receiveLoop(_ conn: NWConnection) {
-        conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] _, _, _, error in
-            if error != nil { return }
-            self?.receiveLoop(conn)
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, _, error in
+            guard let self = self, error == nil, let data = data else { return }
+            self.rttLock.lock()
+            self.parseAckData(data)
+            self.rttLock.unlock()
+            self.receiveLoop(conn)
         }
     }
 
-    func broadcast(payload: Data, isKeyframe: Bool) {
-        var header = Data(capacity: 7)
+    private var ackParseBuffer = Data()
+
+    /// Must be called with rttLock held.
+    private func parseAckData(_ data: Data) {
+        ackParseBuffer.append(data)
+
+        var scanned = 0
+        while ackParseBuffer.count >= 6 {
+            guard ackParseBuffer[ackParseBuffer.startIndex] == MAGIC_ACK[0]
+                    && ackParseBuffer[ackParseBuffer.index(ackParseBuffer.startIndex, offsetBy: 1)] == MAGIC_ACK[1] else {
+                ackParseBuffer.removeFirst()
+                scanned += 1
+                if scanned > 256 {
+                    ackParseBuffer.removeAll()
+                    return
+                }
+                continue
+            }
+
+            let base = ackParseBuffer.startIndex
+            let b0 = UInt32(ackParseBuffer[ackParseBuffer.index(base, offsetBy: 2)])
+            let b1 = UInt32(ackParseBuffer[ackParseBuffer.index(base, offsetBy: 3)]) << 8
+            let b2 = UInt32(ackParseBuffer[ackParseBuffer.index(base, offsetBy: 4)]) << 16
+            let b3 = UInt32(ackParseBuffer[ackParseBuffer.index(base, offsetBy: 5)]) << 24
+            let seq = b0 | b1 | b2 | b3
+            ackParseBuffer.removeFirst(6)
+
+            let now = CACurrentMediaTime()
+
+            guard let sendTime = sendTimestamps.removeValue(forKey: seq) else {
+                continue
+            }
+            let rtt = (now - sendTime) * 1000.0
+            rttSamples.append(rtt)
+            if rttSamples.count > rttWindowSize {
+                rttSamples.removeFirst(rttSamples.count - rttWindowSize)
+            }
+            totalAcks += 1
+
+            let sorted = rttSamples.sorted()
+            let avg = sorted.reduce(0, +) / Double(sorted.count)
+            let p95Index = min(Int(Double(sorted.count) * 0.95), sorted.count - 1)
+
+            let elapsed = now - lastAckStatsTime
+            let rate = elapsed > 0 ? Double(totalAcks) / elapsed : 0
+
+            let stats = LatencyStats(
+                rttMs: rtt,
+                rttMinMs: sorted.first ?? 0,
+                rttMaxMs: sorted.last ?? 0,
+                rttAvgMs: avg,
+                rttP95Ms: sorted[p95Index],
+                acksReceived: totalAcks,
+                ackRate: rate
+            )
+
+            if totalAcks % 30 == 0 {
+                print(String(format: "[RTT] last: %.1fms | avg: %.1fms | p95: %.1fms | min: %.1fms | max: %.1fms | acks: %d",
+                             stats.rttMs, stats.rttAvgMs, stats.rttP95Ms, stats.rttMinMs, stats.rttMaxMs, stats.acksReceived))
+            }
+
+            onLatencyStats?(stats)
+        }
+    }
+
+    func broadcast(payload: Data, isKeyframe: Bool, sequenceNumber: UInt32 = 0) {
+        var header = Data(capacity: FRAME_HEADER_SIZE)
         header.append(contentsOf: MAGIC_FRAME)
         header.append(isKeyframe ? FLAG_KEYFRAME : 0)
+        var seq = sequenceNumber.littleEndian
+        header.append(Data(bytes: &seq, count: 4))
         var len = UInt32(payload.count).littleEndian
         header.append(Data(bytes: &len, count: 4))
 
         var frame = header
         frame.append(payload)
 
+        let sendTime = CACurrentMediaTime()
+
         lock.lock()
         if isKeyframe { lastKeyframeData = frame }
         let conns = connections
         lock.unlock()
+
+        rttLock.lock()
+        sendTimestamps[sequenceNumber] = sendTime
+        // Evict old entries to prevent unbounded growth
+        if sendTimestamps.count > 300 {
+            let cutoff = sequenceNumber &- 300
+            sendTimestamps = sendTimestamps.filter { $0.key > cutoff }
+        }
+        rttLock.unlock()
 
         for conn in conns {
             conn.send(content: frame, completion: .contentProcessed { _ in })

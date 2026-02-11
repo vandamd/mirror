@@ -49,22 +49,24 @@ final class ProtocolTests: XCTestCase {
 
     // MARK: - Frame header layout
 
-    func testFrameHeaderIs7Bytes() {
-        // Build a frame header the same way TCPServer.broadcast does:
-        // [magic:2][flags:1][len:4 LE]
-        var header = Data(capacity: 7)
+    func testFrameHeaderIs11Bytes() {
+        var header = Data(capacity: FRAME_HEADER_SIZE)
         header.append(contentsOf: MAGIC_FRAME)
         header.append(FLAG_KEYFRAME)
+        var seq = UInt32(0).littleEndian
+        header.append(Data(bytes: &seq, count: 4))
         var len = UInt32(1024).littleEndian
         header.append(Data(bytes: &len, count: 4))
 
-        XCTAssertEqual(header.count, 7)
+        XCTAssertEqual(header.count, FRAME_HEADER_SIZE)
     }
 
     func testFrameHeaderMagicPrefix() {
         var header = Data()
         header.append(contentsOf: MAGIC_FRAME)
-        header.append(0x00) // flags
+        header.append(0x00)
+        var seq = UInt32(0).littleEndian
+        header.append(Data(bytes: &seq, count: 4))
         var len = UInt32(0).littleEndian
         header.append(Data(bytes: &len, count: 4))
 
@@ -76,35 +78,66 @@ final class ProtocolTests: XCTestCase {
         var header = Data()
         header.append(contentsOf: MAGIC_FRAME)
         header.append(FLAG_KEYFRAME)
+        var seq = UInt32(0).littleEndian
+        header.append(Data(bytes: &seq, count: 4))
         var len = UInt32(0).littleEndian
         header.append(Data(bytes: &len, count: 4))
 
         XCTAssertEqual(header[2], FLAG_KEYFRAME, "Flags byte is at offset 2")
     }
 
-    func testFrameHeaderLengthIsLittleEndian() {
+    func testFrameHeaderSequencePosition() {
         var header = Data()
         header.append(contentsOf: MAGIC_FRAME)
         header.append(0x00)
-        let payloadSize: UInt32 = 0x01020304
-        var len = payloadSize.littleEndian
+        let seqValue: UInt32 = 0x01020304
+        var seq = seqValue.littleEndian
+        header.append(Data(bytes: &seq, count: 4))
+        var len = UInt32(0).littleEndian
         header.append(Data(bytes: &len, count: 4))
 
-        // Little-endian: least significant byte first
         XCTAssertEqual(header[3], 0x04)
         XCTAssertEqual(header[4], 0x03)
         XCTAssertEqual(header[5], 0x02)
         XCTAssertEqual(header[6], 0x01)
     }
 
+    func testFrameHeaderLengthIsLittleEndian() {
+        var header = Data()
+        header.append(contentsOf: MAGIC_FRAME)
+        header.append(0x00)
+        var seq = UInt32(0).littleEndian
+        header.append(Data(bytes: &seq, count: 4))
+        let payloadSize: UInt32 = 0x01020304
+        var len = payloadSize.littleEndian
+        header.append(Data(bytes: &len, count: 4))
+
+        XCTAssertEqual(header[7], 0x04)
+        XCTAssertEqual(header[8], 0x03)
+        XCTAssertEqual(header[9], 0x02)
+        XCTAssertEqual(header[10], 0x01)
+    }
+
     func testNonKeyframeHasFlagZero() {
         var header = Data()
         header.append(contentsOf: MAGIC_FRAME)
         header.append(0)
+        var seq = UInt32(0).littleEndian
+        header.append(Data(bytes: &seq, count: 4))
         var len = UInt32(100).littleEndian
         header.append(Data(bytes: &len, count: 4))
 
         XCTAssertEqual(header[2], 0x00)
+    }
+
+    func testAckMagicBytes() {
+        XCTAssertEqual(MAGIC_ACK, [0xDA, 0x7A])
+    }
+
+    func testAllMagicBytesAreUnique() {
+        XCTAssertNotEqual(MAGIC_FRAME, MAGIC_CMD)
+        XCTAssertNotEqual(MAGIC_FRAME, MAGIC_ACK)
+        XCTAssertNotEqual(MAGIC_CMD, MAGIC_ACK)
     }
 
     // MARK: - Command packet layout

@@ -33,6 +33,9 @@ public class MirrorEngine: ObservableObject {
     @Published public var frameSizeKB: Int = 0
     @Published public var greyMs: Double = 0      // Greyscale + sharpen time per frame
     @Published public var compressMs: Double = 0   // LZ4 delta compress time per frame
+    @Published public var jitterMs: Double = 0     // SCStream delivery jitter (deviation from expected interval)
+    @Published public var rttMs: Double = 0        // Round-trip latency (Mac send → Android ACK)
+    @Published public var rttP95Ms: Double = 0     // 95th percentile RTT
     @Published public var sharpenAmount: Double = 1.0 {
         didSet {
             capture?.sharpenAmount = sharpenAmount
@@ -298,6 +301,12 @@ public class MirrorEngine: ObservableObject {
                     }
                 }
             }
+            tcp.onLatencyStats = { [weak self] stats in
+                DispatchQueue.main.async {
+                    self?.rttMs = stats.rttAvgMs
+                    self?.rttP95Ms = stats.rttP95Ms
+                }
+            }
             tcp.start()
             tcpServer = tcp
 
@@ -331,7 +340,7 @@ public class MirrorEngine: ObservableObject {
         )
         cap.sharpenAmount = sharpenAmount
         cap.contrastAmount = contrastAmount
-        cap.onStats = { [weak self] fps, bw, frameKB, total, grey, compress in
+        cap.onStats = { [weak self] fps, bw, frameKB, total, grey, compress, jitter in
             DispatchQueue.main.async {
                 self?.fps = fps
                 self?.bandwidth = bw
@@ -339,6 +348,7 @@ public class MirrorEngine: ObservableObject {
                 self?.frameSizeKB = frameKB
                 self?.greyMs = grey
                 self?.compressMs = compress
+                self?.jitterMs = jitter
             }
         }
         capture = cap
