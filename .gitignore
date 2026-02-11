@@ -9,3 +9,5 @@ android/app/build/
 android/build/
 android/app/.cxx/
 android/local.properties
+# Downloaded platform-tools (adb binary for embedding)
+tools/

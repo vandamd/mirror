@@ -2,6 +2,7 @@
 #
 # Usage:
 #   make install   — build Mac menu bar app + install to ~/Applications
+#   make fetch-adb — download adb binary for embedding in the app bundle
 #   make deploy    — build Android APK + install via adb
 #   make run       — launch the menu bar app
 #
@@ -16,7 +17,11 @@ BINARY := .build/release/DaylightMirror
 CLI_BINARY := .build/release/daylight-mirror
 APK := android/app/build/outputs/apk/debug/app-debug.apk
 
-.PHONY: mac android install deploy run clean test
+# Downloaded platform-tools (provides adb binary for embedding in app bundle)
+PLATFORM_TOOLS_DIR := tools/platform-tools
+ADB_BINARY := $(PLATFORM_TOOLS_DIR)/adb
+
+.PHONY: mac android install deploy run clean test fetch-adb
 
 # Build Mac menu bar app
 mac:
@@ -30,6 +35,19 @@ android:
 	cd android && ./gradlew assembleDebug
 	@echo "Done: $(APK)"
 
+# Download Android platform-tools (provides adb binary) if not already cached.
+# The binary is ~6MB and gets embedded in the .app bundle for zero-config setup.
+$(ADB_BINARY):
+	@echo "Downloading Android platform-tools..."
+	@mkdir -p tools
+	@curl -sL https://dl.google.com/android/repository/platform-tools-latest-darwin.zip -o tools/platform-tools.zip
+	@unzip -qo tools/platform-tools.zip -d tools/
+	@rm tools/platform-tools.zip
+	@echo "Downloaded adb: $(ADB_BINARY)"
+
+fetch-adb: $(ADB_BINARY)
+	@echo "adb binary ready: $(ADB_BINARY)"
+
 # Install Mac app to ~/Applications as a proper .app bundle
 install: mac
 	@echo "Installing $(APP_NAME)..."
@@ -39,6 +57,21 @@ install: mac
 	@cp $(CLI_BINARY) "$(APP_BUNDLE)/Contents/MacOS/daylight-mirror"
 	@cp Info.plist "$(APP_BUNDLE)/Contents/Info.plist"
 	@cp Resources/AppIcon.icns "$(APP_BUNDLE)/Contents/Resources/AppIcon.icns"
+	@# Embed bundled adb if available (run 'make fetch-adb' first)
+	@if [ -f "$(ADB_BINARY)" ]; then \
+		cp "$(ADB_BINARY)" "$(APP_BUNDLE)/Contents/Resources/adb"; \
+		chmod +x "$(APP_BUNDLE)/Contents/Resources/adb"; \
+		echo "Embedded bundled adb"; \
+	else \
+		echo "No bundled adb (run 'make fetch-adb' to embed). Will use system adb."; \
+	fi
+	@# Embed companion APK if available (run 'make android' first)
+	@if [ -f "$(APK)" ]; then \
+		cp "$(APK)" "$(APP_BUNDLE)/Contents/Resources/app-debug.apk"; \
+		echo "Embedded companion APK"; \
+	else \
+		echo "No APK found (run 'make android' to build). Auto-install will be skipped."; \
+	fi
 	@codesign --force --deep -s - "$(APP_BUNDLE)"
 	@echo "Installed: $(APP_BUNDLE)"
 	@echo "Open from Spotlight or: open \"$(APP_BUNDLE)\""
