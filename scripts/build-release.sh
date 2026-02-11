@@ -31,16 +31,14 @@ git checkout "$TAG"
 
 # Build Mac binary
 echo "Building Mac binary..."
-cd server
 swift build -c release
-cd ..
 
 # Create .app bundle
 echo "Creating .app bundle..."
 APP_BUNDLE="build/Daylight Mirror.app"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
-cp server/.build/release/DaylightMirror "$APP_BUNDLE/Contents/MacOS/DaylightMirror"
+cp .build/release/DaylightMirror "$APP_BUNDLE/Contents/MacOS/DaylightMirror"
 
 # Update Info.plist with correct version
 sed "s/<string>1.0<\/string>/<string>$VERSION<\/string>/g" Info.plist > "$APP_BUNDLE/Contents/Info.plist"

@@ -17,15 +17,13 @@ jobs:
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
 
       - name: Build Mac binary
-        run: |
-          cd server
-          swift build -c release
+        run: swift build -c release
 
       - name: Create .app bundle
         run: |
           APP_NAME="Daylight Mirror"
           APP_BUNDLE="build/$APP_NAME.app"
-          BINARY="server/.build/release/DaylightMirror"
+          BINARY=".build/release/DaylightMirror"
 
           mkdir -p "$APP_BUNDLE/Contents/MacOS"
           mkdir -p "$APP_BUNDLE/Contents/Resources"

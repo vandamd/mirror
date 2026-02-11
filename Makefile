@@ -12,15 +12,16 @@
 
 APP_NAME := Daylight Mirror
 APP_BUNDLE := $(HOME)/Applications/$(APP_NAME).app
-BINARY := server/.build/release/DaylightMirror
+BINARY := .build/release/DaylightMirror
+CLI_BINARY := .build/release/daylight-mirror
 APK := android/app/build/outputs/apk/debug/app-debug.apk
 
-.PHONY: mac android install deploy run clean
+.PHONY: mac android install deploy run clean test
 
 # Build Mac menu bar app
 mac:
 	@echo "Building Mac app..."
-	cd server && swift build -c release
+	swift build -c release
 	@echo "Done: $(BINARY)"
 
 # Build Android APK (requires Android SDK + NDK)
@@ -35,6 +36,7 @@ install: mac
 	@mkdir -p "$(APP_BUNDLE)/Contents/MacOS"
 	@mkdir -p "$(APP_BUNDLE)/Contents/Resources"
 	@cp $(BINARY) "$(APP_BUNDLE)/Contents/MacOS/DaylightMirror"
+	@cp $(CLI_BINARY) "$(APP_BUNDLE)/Contents/MacOS/daylight-mirror"
 	@cp Info.plist "$(APP_BUNDLE)/Contents/Info.plist"
 	@cp Resources/AppIcon.icns "$(APP_BUNDLE)/Contents/Resources/AppIcon.icns"
 	@codesign --force --deep -s - "$(APP_BUNDLE)"
@@ -57,7 +59,11 @@ tunnel:
 	adb reverse tcp:8888 tcp:8888
 	@echo "Tunnel ready: device:8888 → mac:8888"
 
+# Run unit tests
+test:
+	swift test
+
 clean:
-	cd server && swift package clean
+	swift package clean
 	rm -rf "$(APP_BUNDLE)"
 	@echo "Cleaned"
