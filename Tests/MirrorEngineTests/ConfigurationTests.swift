@@ -60,4 +60,22 @@ final class ConfigurationTests: XCTestCase {
         XCTAssertEqual(DisplayResolution.portraitSharp.width, 1200)
         XCTAssertEqual(DisplayResolution.portraitSharp.height, 1600)
     }
+
+    func testTargetFPSIs30() {
+        XCTAssertEqual(TARGET_FPS, 30)
+    }
+
+    func testTargetFPSDoesNotExceedDeviceLimit() {
+        XCTAssertLessThanOrEqual(TARGET_FPS, 30,
+            "DC-1 renders at ~13ms/frame, cannot sustain >30fps")
+    }
+
+    func testKeyframeIntervalMatchesFPS() {
+        XCTAssertEqual(KEYFRAME_INTERVAL, TARGET_FPS,
+            "Keyframe interval should equal TARGET_FPS (one keyframe per second)")
+    }
+
+    func testFrameHeaderSizeIs11() {
+        XCTAssertEqual(FRAME_HEADER_SIZE, 11)
+    }
 }
