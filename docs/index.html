@@ -409,6 +409,107 @@
       border: 1px solid var(--border);
     }
 
+    /* ── Setup Steps ──────────────────────────────────────── */
+    .setup-steps {
+      text-align: left;
+      max-width: 640px;
+      margin: 0 auto;
+    }
+
+    .setup-step {
+      display: flex;
+      gap: 16px;
+      margin-bottom: 28px;
+    }
+
+    .step-number {
+      flex-shrink: 0;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: var(--accent-dim);
+      color: var(--accent);
+      font-size: 13px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-top: 1px;
+    }
+
+    .step-content h3 {
+      color: var(--heading);
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+
+    .step-content p {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.6;
+      margin-bottom: 8px;
+    }
+
+    .cmd-box {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 14px;
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 12px;
+      margin-top: 4px;
+    }
+
+    .cmd-box code { color: var(--text); }
+    .cmd-box .prompt { color: var(--accent); }
+
+    .step-note {
+      color: var(--muted);
+      font-size: 11px;
+      margin-top: 6px;
+      font-style: italic;
+    }
+
+    /* ── Troubleshoot Callout ─────────────────────────────── */
+    .troubleshoot {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 24px;
+      max-width: 640px;
+      margin: 48px auto 0;
+      text-align: left;
+    }
+
+    .troubleshoot h3 {
+      color: var(--heading);
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    .troubleshoot p {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.6;
+      margin-bottom: 10px;
+    }
+
+    .troubleshoot .cmd-box {
+      display: flex;
+      width: 100%;
+    }
+
+    .troubleshoot .cmd-box code {
+      flex: 1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
     /* ── Mobile ───────────────────────────────────────────── */
     @media (max-width: 768px) {
       section { padding: 48px 0; }
@@ -440,6 +541,9 @@
       .evolution-table th, .evolution-table td { padding: 8px 10px; }
 
       .menu-bar-section img { max-width: 100%; }
+
+      .cmd-box { font-size: 11px; }
+      .setup-step { gap: 12px; }
     }
   </style>
 </head>
@@ -631,7 +735,7 @@
   </section>
 
   <!-- ════════════════════════════════════════════════════════
-       Download
+       Download + Setup
        ════════════════════════════════════════════════════════ -->
   <section class="download">
     <div class="content">
@@ -646,13 +750,97 @@
 
         <div class="brew-box">
           <code><span class="prompt">$</span> brew install --cask welfvh/tap/daylight-mirror</code>
-          <button class="copy-btn" onclick="copyBrew(this)">copy</button>
+          <button class="copy-btn" onclick="copyCmd(this, 'brew install --cask welfvh/tap/daylight-mirror')">copy</button>
         </div>
 
         <div class="download-links">
           <a href="https://github.com/welfvh/daylight-mirror/releases">GitHub Releases</a>
           <a href="https://github.com/welfvh/daylight-mirror">Source Code</a>
         </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ════════════════════════════════════════════════════════
+       Setup Guide
+       ════════════════════════════════════════════════════════ -->
+  <section>
+    <div class="content">
+      <div class="section-label">Setup</div>
+      <h2 style="text-align: center;">Up and running in 5 minutes</h2>
+      <p style="color: var(--muted); text-align: center; margin-bottom: 40px;">Homebrew handles most of this. If you downloaded the DMG, follow every step.</p>
+
+      <div class="setup-steps">
+
+        <div class="setup-step">
+          <div class="step-number">1</div>
+          <div class="step-content">
+            <h3>Install ADB</h3>
+            <p>Required for USB communication with the Daylight. Homebrew installs this automatically with the cask.</p>
+            <div class="cmd-box">
+              <code><span class="prompt">$</span> brew install android-platform-tools</code>
+              <button class="copy-btn" onclick="copyCmd(this, 'brew install android-platform-tools')">copy</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="setup-step">
+          <div class="step-number">2</div>
+          <div class="step-content">
+            <h3>Enable USB debugging on the Daylight</h3>
+            <p>One-time setup on your DC-1:</p>
+            <p style="color: var(--text); margin-bottom: 0;">
+              <strong>Settings</strong> &rarr; <strong>About tablet</strong> &rarr; tap <strong>Build number</strong> 7 times<br>
+              <strong>Settings</strong> &rarr; <strong>Developer options</strong> &rarr; enable <strong>USB debugging</strong>
+            </p>
+          </div>
+        </div>
+
+        <div class="setup-step">
+          <div class="step-number">3</div>
+          <div class="step-content">
+            <h3>Connect &amp; verify</h3>
+            <p>Plug the Daylight into your Mac via USB-C. Tap <strong>Allow</strong> on the USB debugging prompt that appears on the Daylight.</p>
+            <div class="cmd-box">
+              <code><span class="prompt">$</span> adb devices</code>
+              <button class="copy-btn" onclick="copyCmd(this, 'adb devices')">copy</button>
+            </div>
+            <p class="step-note">You should see your device listed. If not, try a different USB-C cable.</p>
+          </div>
+        </div>
+
+        <div class="setup-step">
+          <div class="step-number">4</div>
+          <div class="step-content">
+            <h3>Install the Android app</h3>
+            <p>Push the companion app to your Daylight. The DMG includes the APK; Homebrew downloads it automatically.</p>
+            <div class="cmd-box">
+              <code><span class="prompt">$</span> adb install /opt/homebrew/share/daylight-mirror/DaylightMirror.apk</code>
+              <button class="copy-btn" onclick="copyCmd(this, 'adb install /opt/homebrew/share/daylight-mirror/DaylightMirror.apk')">copy</button>
+            </div>
+            <p class="step-note">DMG users: adb install /Volumes/Daylight\ Mirror/DaylightMirror.apk</p>
+          </div>
+        </div>
+
+        <div class="setup-step">
+          <div class="step-number">5</div>
+          <div class="step-content">
+            <h3>Start mirroring</h3>
+            <p>Open <strong>Daylight Mirror</strong> from Spotlight, pick a resolution, and click <strong>Start Mirror</strong>. The app auto-launches on the Daylight — your screen appears in seconds.</p>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Troubleshoot callout -->
+      <div class="troubleshoot">
+        <h3>Stuck?</h3>
+        <p>If you have <a href="https://docs.anthropic.com/en/docs/claude-code">Claude Code</a> installed, it can walk you through setup and debug connection issues:</p>
+        <div class="cmd-box">
+          <code><span class="prompt">$</span> claude "help me set up Daylight Mirror on my Mac"</code>
+          <button class="copy-btn" onclick="copyCmd(this, 'claude &quot;help me set up Daylight Mirror on my Mac&quot;')">copy</button>
+        </div>
+        <p style="margin-top: 10px; margin-bottom: 0;">Or <a href="https://github.com/welfvh/daylight-mirror/issues">open an issue on GitHub</a> — we respond fast.</p>
       </div>
     </div>
   </section>
@@ -684,8 +872,8 @@
        Clipboard JS — copy brew command
        ════════════════════════════════════════════════════════ -->
   <script>
-    function copyBrew(btn) {
-      navigator.clipboard.writeText('brew install --cask welfvh/tap/daylight-mirror').then(function() {
+    function copyCmd(btn, text) {
+      navigator.clipboard.writeText(text).then(function() {
         btn.textContent = 'copied';
         setTimeout(function() { btn.textContent = 'copy'; }, 2000);
       });
