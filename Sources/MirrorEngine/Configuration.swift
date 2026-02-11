@@ -8,7 +8,7 @@ import Foundation
 let TCP_PORT: UInt16 = 8888
 let WS_PORT: UInt16 = 8890
 let HTTP_PORT: UInt16 = 8891
-let TARGET_FPS: Int = 30
+let TARGET_FPS: Int = 30  // Daylight DC-1 renders at ~13ms/frame, cannot sustain 60fps
 let JPEG_QUALITY: CGFloat = 0.8
 let KEYFRAME_INTERVAL: Int = 30
 

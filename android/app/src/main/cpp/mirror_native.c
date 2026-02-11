@@ -23,7 +23,12 @@
 #include <arpa/inet.h>
 #include <arm_neon.h>
 
+#include <android/hardware_buffer.h>
 #include "lz4.h"
+
+#ifndef AHARDWAREBUFFER_FORMAT_R8_UNORM
+#define AHARDWAREBUFFER_FORMAT_R8_UNORM 0x38
+#endif
 
 #define TAG "DaylightMirror"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -87,8 +92,10 @@ static void apply_delta_neon(uint8_t *frame, const uint8_t *delta, int count) {
     }
 }
 
-// Expand greyscale to RGBX_8888 and write to ANativeWindow buffer.
-// Uses NEON to broadcast each grey byte to [G, G, G, 0xFF].
+// Write greyscale directly to ANativeWindow in R8_UNORM format (1 byte/pixel).
+// Falls back to RGBX expansion if R8 is not supported.
+static int g_r8_supported = 0;  // R8_UNORM not compositable by SurfaceFlinger on DC-1
+
 static void blit_grey_to_surface(ANativeWindow *window, const uint8_t *grey) {
     ANativeWindow_Buffer buffer;
     if (ANativeWindow_lock(window, &buffer, NULL) != 0) {
@@ -96,39 +103,44 @@ static void blit_grey_to_surface(ANativeWindow *window, const uint8_t *grey) {
         return;
     }
 
-    // Buffer format is RGBX_8888 (4 bytes per pixel)
     uint8_t *dst = (uint8_t *)buffer.bits;
-    int dst_stride = buffer.stride * 4;  // stride is in pixels, we need bytes
-
     int fw = (int)g_frame_w;
     int fh = (int)g_frame_h;
-    for (int y = 0; y < fh && y < buffer.height; y++) {
-        uint8_t *row = dst + y * dst_stride;
-        const uint8_t *src = grey + y * fw;
-        int x = 0;
 
-        // NEON: process 16 greyscale pixels → 16 RGBX pixels (64 bytes output)
-        for (; x + 16 <= fw && x + 16 <= buffer.width; x += 16) {
-            uint8x16_t g = vld1q_u8(src + x);
-            uint8x16_t ff = vdupq_n_u8(0xFF);
-
-            // Interleave: [R,G,B,X] = [grey,grey,grey,0xFF] for each pixel
-            // Use zip to interleave pairs, then zip again for quads
-            uint8x16x4_t rgbx;
-            rgbx.val[0] = g;    // R
-            rgbx.val[1] = g;    // G
-            rgbx.val[2] = g;    // B
-            rgbx.val[3] = ff;   // X (alpha)
-            vst4q_u8(row + x * 4, rgbx);
+    if (g_r8_supported) {
+        if (buffer.stride == fw && fw <= buffer.width && fh <= buffer.height) {
+            memcpy(dst, grey, (size_t)fw * fh);
+        } else {
+            int dst_stride = buffer.stride;
+            for (int y = 0; y < fh && y < buffer.height; y++) {
+                int w = fw < buffer.width ? fw : buffer.width;
+                memcpy(dst + y * dst_stride, grey + y * fw, w);
+            }
         }
-
-        // Remaining pixels
-        for (; x < fw && x < buffer.width; x++) {
-            uint8_t v = src[x];
-            row[x * 4 + 0] = v;     // R
-            row[x * 4 + 1] = v;     // G
-            row[x * 4 + 2] = v;     // B
-            row[x * 4 + 3] = 0xFF;  // A
+    } else {
+        // Fallback: RGBX_8888 (4 bytes per pixel) with NEON expansion
+        int dst_stride = buffer.stride * 4;
+        for (int y = 0; y < fh && y < buffer.height; y++) {
+            uint8_t *row = dst + y * dst_stride;
+            const uint8_t *src = grey + y * fw;
+            int x = 0;
+            for (; x + 16 <= fw && x + 16 <= buffer.width; x += 16) {
+                uint8x16_t g = vld1q_u8(src + x);
+                uint8x16_t ff = vdupq_n_u8(0xFF);
+                uint8x16x4_t rgbx;
+                rgbx.val[0] = g;
+                rgbx.val[1] = g;
+                rgbx.val[2] = g;
+                rgbx.val[3] = ff;
+                vst4q_u8(row + x * 4, rgbx);
+            }
+            for (; x < fw && x < buffer.width; x++) {
+                uint8_t v = src[x];
+                row[x * 4 + 0] = v;
+                row[x * 4 + 1] = v;
+                row[x * 4 + 2] = v;
+                row[x * 4 + 3] = 0xFF;
+            }
         }
     }
 
@@ -209,7 +221,7 @@ static void *mirror_thread(void *arg) {
         int dropped_frames = 0;
         uint32_t last_seq = 0;
         int has_last_seq = 0;
-        double recv_sum = 0, decomp_sum = 0, delta_sum = 0, blit_sum = 0;
+        double recv_sum = 0, decomp_sum = 0, delta_sum = 0, neon_sum = 0, vsync_sum = 0;
         struct timespec stat_start;
         clock_gettime(CLOCK_MONOTONIC, &stat_start);
 
@@ -253,7 +265,6 @@ static void *mirror_thread(void *arg) {
                         g_current_frame = (uint8_t *)calloc(g_pixel_count, 1);
                         g_compressed_buf = (uint8_t *)malloc(g_max_compressed);
                         decompress_buf = (uint8_t *)malloc(g_pixel_count);
-                        // Update window geometry
                         if (g_window) {
                             ANativeWindow_setBuffersGeometry(g_window, new_w, new_h,
                                 AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM);
@@ -352,8 +363,44 @@ static void *mirror_thread(void *arg) {
             }
             clock_gettime(CLOCK_MONOTONIC, &t3);
 
+            // ACK immediately after decode — don't wait for vsync
+            send_ack(sock, seq);
+
+            struct timespec t4a, t4b;
             if (g_window) {
-                blit_grey_to_surface(g_window, g_current_frame);
+                ANativeWindow_Buffer nbuf;
+                if (ANativeWindow_lock(g_window, &nbuf, NULL) == 0) {
+                    clock_gettime(CLOCK_MONOTONIC, &t4a);
+                    // NEON grey→RGBX expansion
+                    uint8_t *dst = (uint8_t *)nbuf.bits;
+                    int dst_stride = nbuf.stride * 4;
+                    int fw = (int)g_frame_w;
+                    int fh = (int)g_frame_h;
+                    for (int y = 0; y < fh && y < nbuf.height; y++) {
+                        uint8_t *row = dst + y * dst_stride;
+                        const uint8_t *src = g_current_frame + y * fw;
+                        int x = 0;
+                        for (; x + 16 <= fw && x + 16 <= nbuf.width; x += 16) {
+                            uint8x16_t g = vld1q_u8(src + x);
+                            uint8x16_t ff = vdupq_n_u8(0xFF);
+                            uint8x16x4_t rgbx;
+                            rgbx.val[0] = g;
+                            rgbx.val[1] = g;
+                            rgbx.val[2] = g;
+                            rgbx.val[3] = ff;
+                            vst4q_u8(row + x * 4, rgbx);
+                        }
+                        for (; x < fw && x < nbuf.width; x++) {
+                            uint8_t v = src[x];
+                            row[x * 4 + 0] = v;
+                            row[x * 4 + 1] = v;
+                            row[x * 4 + 2] = v;
+                            row[x * 4 + 3] = 0xFF;
+                        }
+                    }
+                    clock_gettime(CLOCK_MONOTONIC, &t4b);
+                    ANativeWindow_unlockAndPost(g_window);
+                }
                 if (frame_count == 0) {
                     LOGI("First frame rendered: %ux%u %s (%u bytes compressed)",
                          g_frame_w, g_frame_h,
@@ -361,20 +408,21 @@ static void *mirror_thread(void *arg) {
                          payload_len);
                 }
             } else {
+                clock_gettime(CLOCK_MONOTONIC, &t4a);
+                t4b = t4a;
                 if (frame_count == 0) {
                     LOGE("Frame received but g_window is NULL — surface not ready");
                 }
             }
-            clock_gettime(CLOCK_MONOTONIC, &t4);
+            struct timespec t5;
+            clock_gettime(CLOCK_MONOTONIC, &t5);
 
-            send_ack(sock, seq);
-
-            // Accumulate per-stage timing (in ms)
             #define MS(a,b) (((b).tv_sec-(a).tv_sec)*1000.0 + ((b).tv_nsec-(a).tv_nsec)/1e6)
             recv_sum   += MS(t0, t1);
             decomp_sum += MS(t1, t2);
             delta_sum  += MS(t2, t3);
-            blit_sum   += MS(t3, t4);
+            neon_sum   += MS(t4a, t4b);
+            vsync_sum  += MS(t4b, t5);
 
             frame_count++;
             stat_frames++;
@@ -386,18 +434,19 @@ static void *mirror_thread(void *arg) {
                              (now.tv_nsec - stat_start.tv_nsec) / 1e9;
             if (elapsed >= 5.0 && stat_frames > 0) {
                 double fps = stat_frames / elapsed;
-                LOGI("FPS: %.1f | recv: %.1fms | lz4: %.1fms | delta: %.1fms | blit: %.1fms | %uKB %s | drops: %d | total: %d",
+                LOGI("FPS: %.1f | recv: %.1fms | lz4: %.1fms | delta: %.1fms | neon: %.1fms | vsync: %.1fms | %uKB %s | drops: %d | total: %d",
                      fps,
                      recv_sum / stat_frames,
                      decomp_sum / stat_frames,
                      delta_sum / stat_frames,
-                     blit_sum / stat_frames,
+                     neon_sum / stat_frames,
+                     vsync_sum / stat_frames,
                      payload_len / 1024,
                      (flags & FLAG_KEYFRAME) ? "KF" : "delta",
                      dropped_frames,
                      frame_count);
                 stat_frames = 0;
-                recv_sum = decomp_sum = delta_sum = blit_sum = 0;
+                recv_sum = decomp_sum = delta_sum = neon_sum = vsync_sum = 0;
                 stat_start = now;
             }
         }
@@ -443,12 +492,12 @@ Java_com_daylight_mirror_MirrorActivity_nativeStart(
 {
     if (g_running) return;
 
-    // Store JVM and activity for brightness callbacks from mirror thread
     (*env)->GetJavaVM(env, &g_jvm);
     g_activity = (*env)->NewGlobalRef(env, thiz);
 
     g_window = ANativeWindow_fromSurface(env, surface);
-    ANativeWindow_setBuffersGeometry(g_window, g_frame_w, g_frame_h, AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM);
+    ANativeWindow_setBuffersGeometry(g_window, g_frame_w, g_frame_h,
+        AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM);
 
     const char *host_str = (*env)->GetStringUTFChars(env, host, NULL);
     strncpy(g_host, host_str, sizeof(g_host) - 1);

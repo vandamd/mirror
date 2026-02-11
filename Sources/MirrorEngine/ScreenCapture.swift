@@ -51,6 +51,8 @@ class ScreenCapture: NSObject, SCStreamOutput {
 
     var frameCount: Int = 0
     var frameSequence: UInt32 = 0
+    var skippedFrames: Int = 0
+    var forceNextKeyframe: Bool = false
     var lastStatTime: Date = Date()
     var convertTimeSum: Double = 0
     var compressTimeSum: Double = 0
@@ -63,7 +65,7 @@ class ScreenCapture: NSObject, SCStreamOutput {
     let jitterWindowSize = 150
 
     /// Callback: (fps, bandwidthMB, frameSizeKB, totalFrames, greyMs, compressMs, jitterMs)
-    var onStats: ((Double, Double, Int, Int, Double, Double, Double) -> Void)?
+    var onStats: ((Double, Double, Int, Int, Double, Double, Double, Int) -> Void)?
 
     let expectedWidth: Int
     let expectedHeight: Int
@@ -235,7 +237,25 @@ class ScreenCapture: NSObject, SCStreamOutput {
 
         let t1 = CACurrentMediaTime()
 
-        let isKeyframe = (frameCount % KEYFRAME_INTERVAL == 0)
+        // Drop frames when Android can't keep up — send only the latest
+        let inflight = tcpServer.inflightFrames
+        let isScheduledKeyframe = (frameCount % KEYFRAME_INTERVAL == 0)
+
+        if inflight > 1 && !isScheduledKeyframe {
+            skippedFrames += 1
+            forceNextKeyframe = true
+            // Still swap buffers so currentGray stays fresh for next delta base
+            let temp = previousGray
+            previousGray = currentGray
+            currentGray = temp
+
+            CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly)
+            frameCount += 1
+            return
+        }
+
+        let isKeyframe = isScheduledKeyframe || forceNextKeyframe
+        if forceNextKeyframe { forceNextKeyframe = false }
         let seq = frameSequence
         frameSequence &+= 1
 
@@ -293,9 +313,9 @@ class ScreenCapture: NSObject, SCStreamOutput {
             let bw = Double(lastCompressedSize) * fps / 1024 / 1024
             let avgJitter = jitterSamples.isEmpty ? 0.0 : jitterSamples.reduce(0, +) / Double(jitterSamples.count)
 
-            print(String(format: "FPS: %.1f | gray: %.1fms | lz4+delta: %.1fms | jitter: %.1fms | frame: %dKB | ~%.1fMB/s | total: %d",
-                         fps, avgConvert, avgCompress, avgJitter, lastCompressedSize / 1024, bw, frameCount))
-            onStats?(fps, bw, lastCompressedSize / 1024, frameCount, avgConvert, avgCompress, avgJitter)
+            print(String(format: "FPS: %.1f | gray: %.1fms | lz4+delta: %.1fms | jitter: %.1fms | frame: %dKB | ~%.1fMB/s | total: %d | skipped: %d",
+                         fps, avgConvert, avgCompress, avgJitter, lastCompressedSize / 1024, bw, frameCount, skippedFrames))
+            onStats?(fps, bw, lastCompressedSize / 1024, frameCount, avgConvert, avgCompress, avgJitter, skippedFrames)
 
             statFrames = 0
             convertTimeSum = 0
