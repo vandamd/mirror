@@ -100,8 +100,7 @@ final class ProtocolTests: XCTestCase {
     func testNonKeyframeHasFlagZero() {
         var header = Data()
         header.append(contentsOf: MAGIC_FRAME)
-        let isKeyframe = false
-        header.append(isKeyframe ? FLAG_KEYFRAME : 0)
+        header.append(0)
         var len = UInt32(100).littleEndian
         header.append(Data(bytes: &len, count: 4))
 
