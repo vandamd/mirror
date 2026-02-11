@@ -67,11 +67,16 @@ public enum DisplayResolution: String, CaseIterable, Identifiable {
 // Protocol constants
 let MAGIC_FRAME: [UInt8] = [0xDA, 0x7E]
 let MAGIC_CMD: [UInt8] = [0xDA, 0x7F]
+let MAGIC_ACK: [UInt8] = [0xDA, 0x7A]  // ACK from Android → Mac for RTT measurement
 let FLAG_KEYFRAME: UInt8 = 0x01
 let CMD_BRIGHTNESS: UInt8 = 0x01
 let CMD_WARMTH: UInt8 = 0x02
 let CMD_BACKLIGHT_TOGGLE: UInt8 = 0x03
 let CMD_RESOLUTION: UInt8 = 0x04
+
+// Frame header: [DA 7E] [flags:1] [seq:4 LE] [len:4 LE] [payload] = 11 bytes
+// ACK packet:   [DA 7A] [seq:4 LE] = 6 bytes (sent by Android after rendering)
+let FRAME_HEADER_SIZE = 11
 
 let BRIGHTNESS_STEP: Int = 15
 let WARMTH_STEP: Int = 20

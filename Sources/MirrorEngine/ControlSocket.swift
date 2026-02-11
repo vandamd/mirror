@@ -248,6 +248,22 @@ public class ControlSocket {
                 return "OK \(engine.fontSmoothingDisabled ? "off" : "on")"
             }
 
+        case "LATENCY":
+            guard engine.status == .running else {
+                return "ERR not running"
+            }
+            let lines = [
+                "fps=\(String(format: "%.1f", engine.fps))",
+                "grey_ms=\(String(format: "%.1f", engine.greyMs))",
+                "compress_ms=\(String(format: "%.1f", engine.compressMs))",
+                "jitter_ms=\(String(format: "%.1f", engine.jitterMs))",
+                "rtt_avg_ms=\(String(format: "%.1f", engine.rttMs))",
+                "rtt_p95_ms=\(String(format: "%.1f", engine.rttP95Ms))",
+                "clients=\(engine.clientCount)",
+                "total_frames=\(engine.totalFrames)"
+            ]
+            return "OK\n" + lines.joined(separator: "\n")
+
         default:
             return "ERR unknown command"
         }

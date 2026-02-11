@@ -50,14 +50,20 @@ class ScreenCapture: NSObject, SCStreamOutput {
     var pixelCount: Int = 0
 
     var frameCount: Int = 0
+    var frameSequence: UInt32 = 0
     var lastStatTime: Date = Date()
     var convertTimeSum: Double = 0
     var compressTimeSum: Double = 0
     var statFrames: Int = 0
     var lastCompressedSize: Int = 0
 
-    /// Callback: (fps, bandwidthMB, frameSizeKB, totalFrames, greyMs, compressMs)
-    var onStats: ((Double, Double, Int, Int, Double, Double) -> Void)?
+    // Jitter tracking: measures interval variance between SCStream callbacks
+    var lastCallbackTime: Double = 0
+    var jitterSamples: [Double] = []
+    let jitterWindowSize = 150
+
+    /// Callback: (fps, bandwidthMB, frameSizeKB, totalFrames, greyMs, compressMs, jitterMs)
+    var onStats: ((Double, Double, Int, Int, Double, Double, Double) -> Void)?
 
     let expectedWidth: Int
     let expectedHeight: Int
@@ -150,6 +156,17 @@ class ScreenCapture: NSObject, SCStreamOutput {
 
         let t0 = CACurrentMediaTime()
 
+        if lastCallbackTime > 0 {
+            let interval = (t0 - lastCallbackTime) * 1000.0
+            let expectedInterval = 1000.0 / Double(TARGET_FPS)
+            let jitter = abs(interval - expectedInterval)
+            jitterSamples.append(jitter)
+            if jitterSamples.count > jitterWindowSize {
+                jitterSamples.removeFirst(jitterSamples.count - jitterWindowSize)
+            }
+        }
+        lastCallbackTime = t0
+
         CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
         let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer)!
         let rowBytes = CVPixelBufferGetBytesPerRow(pixelBuffer)
@@ -219,6 +236,8 @@ class ScreenCapture: NSObject, SCStreamOutput {
         let t1 = CACurrentMediaTime()
 
         let isKeyframe = (frameCount % KEYFRAME_INTERVAL == 0)
+        let seq = frameSequence
+        frameSequence &+= 1
 
         if isKeyframe {
             let compressedSize = LZ4_compress_default(
@@ -226,7 +245,7 @@ class ScreenCapture: NSObject, SCStreamOutput {
                 LZ4_compressBound(Int32(pixelCount))
             )
             let payload = Data(bytes: compressedBuffer!, count: Int(compressedSize))
-            tcpServer.broadcast(payload: payload, isKeyframe: true)
+            tcpServer.broadcast(payload: payload, isKeyframe: true, sequenceNumber: seq)
             lastCompressedSize = Int(compressedSize)
         } else {
             for i in 0..<pixelCount {
@@ -237,7 +256,7 @@ class ScreenCapture: NSObject, SCStreamOutput {
                 LZ4_compressBound(Int32(pixelCount))
             )
             let payload = Data(bytes: compressedBuffer!, count: Int(compressedSize))
-            tcpServer.broadcast(payload: payload, isKeyframe: false)
+            tcpServer.broadcast(payload: payload, isKeyframe: false, sequenceNumber: seq)
             lastCompressedSize = Int(compressedSize)
         }
 
@@ -272,10 +291,11 @@ class ScreenCapture: NSObject, SCStreamOutput {
             let avgConvert = statFrames > 0 ? convertTimeSum / Double(statFrames) : 0
             let avgCompress = statFrames > 0 ? compressTimeSum / Double(statFrames) : 0
             let bw = Double(lastCompressedSize) * fps / 1024 / 1024
+            let avgJitter = jitterSamples.isEmpty ? 0.0 : jitterSamples.reduce(0, +) / Double(jitterSamples.count)
 
-            print(String(format: "FPS: %.1f | gray: %.1fms | lz4+delta: %.1fms | frame: %dKB | ~%.1fMB/s | total: %d",
-                         fps, avgConvert, avgCompress, lastCompressedSize / 1024, bw, frameCount))
-            onStats?(fps, bw, lastCompressedSize / 1024, frameCount, avgConvert, avgCompress)
+            print(String(format: "FPS: %.1f | gray: %.1fms | lz4+delta: %.1fms | jitter: %.1fms | frame: %dKB | ~%.1fMB/s | total: %d",
+                         fps, avgConvert, avgCompress, avgJitter, lastCompressedSize / 1024, bw, frameCount))
+            onStats?(fps, bw, lastCompressedSize / 1024, frameCount, avgConvert, avgCompress, avgJitter)
 
             statFrames = 0
             convertTimeSum = 0

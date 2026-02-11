@@ -4,8 +4,9 @@
 // decompresses, applies delta, and writes directly to ANativeWindow.
 // Entire hot path is C — no JNI calls, no Java GC, no GPU.
 //
-// Protocol: [0xDA 0x7E] [flags:1B] [length:4B LE] [LZ4 payload]
+// Protocol: [0xDA 0x7E] [flags:1B] [seq:4B LE] [length:4B LE] [LZ4 payload]
 //   flags bit 0: 1=keyframe, 0=delta (XOR with previous)
+// ACK:      [0xDA 0x7A] [seq:4B LE] — sent back after rendering each frame
 
 #include <jni.h>
 #include <android/native_window.h>
@@ -32,12 +33,12 @@
 #define DEFAULT_FRAME_W 1024
 #define DEFAULT_FRAME_H 768
 
-// Protocol constants
 #define MAGIC_FRAME_0 0xDA
-#define MAGIC_FRAME_1 0x7E   // Frame packet: [DA 7E] [flags] [len:4] [payload]
-#define MAGIC_CMD_1   0x7F   // Command packet: [DA 7F] [cmd] [payload...]
+#define MAGIC_FRAME_1 0x7E
+#define MAGIC_CMD_1   0x7F
+#define MAGIC_ACK_1   0x7A
 #define FLAG_KEYFRAME 0x01
-#define HEADER_SIZE 7
+#define FRAME_HEADER_SIZE 11
 #define CMD_BRIGHTNESS 0x01
 #define CMD_RESOLUTION 0x04
 
@@ -134,6 +135,17 @@ static void blit_grey_to_surface(ANativeWindow *window, const uint8_t *grey) {
     ANativeWindow_unlockAndPost(window);
 }
 
+static void send_ack(int sock, uint32_t seq) {
+    uint8_t ack[6];
+    ack[0] = MAGIC_FRAME_0;
+    ack[1] = MAGIC_ACK_1;
+    ack[2] = (uint8_t)(seq & 0xFF);
+    ack[3] = (uint8_t)((seq >> 8) & 0xFF);
+    ack[4] = (uint8_t)((seq >> 16) & 0xFF);
+    ack[5] = (uint8_t)((seq >> 24) & 0xFF);
+    send(sock, ack, 6, MSG_NOSIGNAL);
+}
+
 // Main receive + render loop (runs on dedicated thread)
 static void *mirror_thread(void *arg) {
     (void)arg;
@@ -194,6 +206,9 @@ static void *mirror_thread(void *arg) {
 
         int frame_count = 0;
         int stat_frames = 0;
+        int dropped_frames = 0;
+        uint32_t last_seq = 0;
+        int has_last_seq = 0;
         double recv_sum = 0, decomp_sum = 0, delta_sum = 0, blit_sum = 0;
         struct timespec stat_start;
         clock_gettime(CLOCK_MONOTONIC, &stat_start);
@@ -280,15 +295,27 @@ static void *mirror_thread(void *arg) {
                 break;
             }
 
-            // Read remaining frame header: [flags:1][length:4]
-            uint8_t frame_hdr[5];
-            if (read_exact(sock, frame_hdr, 5) < 0) {
+            // [flags:1][seq:4 LE][length:4 LE]
+            uint8_t frame_hdr[9];
+            if (read_exact(sock, frame_hdr, 9) < 0) {
                 LOGE("Connection lost reading frame header");
                 break;
             }
 
             uint8_t flags = frame_hdr[0];
-            uint32_t payload_len = frame_hdr[1] | (frame_hdr[2] << 8) | (frame_hdr[3] << 16) | (frame_hdr[4] << 24);
+            uint32_t seq = frame_hdr[1] | (frame_hdr[2] << 8) | (frame_hdr[3] << 16) | (frame_hdr[4] << 24);
+            uint32_t payload_len = frame_hdr[5] | (frame_hdr[6] << 8) | (frame_hdr[7] << 16) | (frame_hdr[8] << 24);
+
+            if (has_last_seq && seq != last_seq + 1) {
+                int gap = (int)(seq - last_seq - 1);
+                if (gap > 0 && gap < 1000) {
+                    dropped_frames += gap;
+                    LOGI("Frame drop detected: seq %u → %u (%d frames dropped, total: %d)",
+                         last_seq, seq, gap, dropped_frames);
+                }
+            }
+            last_seq = seq;
+            has_last_seq = 1;
 
             if (payload_len > g_max_compressed) {
                 LOGE("Payload too large: %u", payload_len);
@@ -325,7 +352,6 @@ static void *mirror_thread(void *arg) {
             }
             clock_gettime(CLOCK_MONOTONIC, &t3);
 
-            // Render to surface
             if (g_window) {
                 blit_grey_to_surface(g_window, g_current_frame);
                 if (frame_count == 0) {
@@ -340,6 +366,8 @@ static void *mirror_thread(void *arg) {
                 }
             }
             clock_gettime(CLOCK_MONOTONIC, &t4);
+
+            send_ack(sock, seq);
 
             // Accumulate per-stage timing (in ms)
             #define MS(a,b) (((b).tv_sec-(a).tv_sec)*1000.0 + ((b).tv_nsec-(a).tv_nsec)/1e6)
@@ -358,7 +386,7 @@ static void *mirror_thread(void *arg) {
                              (now.tv_nsec - stat_start.tv_nsec) / 1e9;
             if (elapsed >= 5.0 && stat_frames > 0) {
                 double fps = stat_frames / elapsed;
-                LOGI("FPS: %.1f | recv: %.1fms | lz4: %.1fms | delta: %.1fms | blit: %.1fms | %uKB %s | total: %d",
+                LOGI("FPS: %.1f | recv: %.1fms | lz4: %.1fms | delta: %.1fms | blit: %.1fms | %uKB %s | drops: %d | total: %d",
                      fps,
                      recv_sum / stat_frames,
                      decomp_sum / stat_frames,
@@ -366,6 +394,7 @@ static void *mirror_thread(void *arg) {
                      blit_sum / stat_frames,
                      payload_len / 1024,
                      (flags & FLAG_KEYFRAME) ? "KF" : "delta",
+                     dropped_frames,
                      frame_count);
                 stat_frames = 0;
                 recv_sum = decomp_sum = delta_sum = blit_sum = 0;
