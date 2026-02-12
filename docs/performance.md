@@ -5,14 +5,42 @@ How to measure, profile, and optimize latency in Daylight Mirror.
 ## Architecture
 
 ```
-Mac                              USB                 Daylight DC-1
-┌──────────────────┐         ┌───────┐         ┌──────────────────┐
-│ CGDisplayStream  │──BGRA──▶│       │         │                  │
-│ vImage greyscale │──grey──▶│       │  TCP    │ LZ4 decompress   │
-│ LZ4 delta compress│─bytes─▶│  USB  │────────▶│ XOR delta apply  │
-│                  │         │       │         │ GL shader blit   │
-│                  │◀──ACK───│       │◀───ACK──│ eglSwapBuffers   │
-└──────────────────┘         └───────┘         └──────────────────┘
+┌─────────────────── Mac ───────────────────┐
+│                                           │
+│  CGDisplayStream (BGRA, 60fps)            │
+│         │                                 │
+│         ▼                                 │
+│  vImage SIMD greyscale (1.2ms)            │
+│         │                                 │
+│         ▼                                 │
+│  XOR delta vs previous frame (0.1ms)      │
+│         │                                 │
+│         ▼                                 │
+│  LZ4 compress (1.6ms → ~7KB)              │
+│         │                                 │
+│         ▼                                 │
+│  Raw TCP + binary protocol                │
+│         │                                 │
+└─────────┼─────────────────────────────────┘
+          │ USB (adb reverse tcp:8888)
+          │ ~0.4MB/s
+┌─────────┼──────── Daylight DC-1 ──────────┐
+│         ▼                                 │
+│  TCP recv + protocol parse                │
+│         │                                 │
+│         ▼                                 │
+│  LZ4 decompress (3.1ms)                   │
+│         │                                 │
+│         ▼                                 │
+│  NEON XOR delta apply (3.6ms)             │
+│         │                                 │
+│         ▼                                 │
+│  GL shader grey→RGB expand (3.3ms)        │
+│         │                                 │
+│         ▼                                 │
+│  eglSwapBuffers                           │
+│                                           │
+└───────────────────────────────────────────┘
 ```
 
 Every frame follows this pipeline:
