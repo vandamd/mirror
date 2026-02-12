@@ -264,4 +264,4 @@ The streaming pipeline hasn't changed since Part 2 — it didn't need to. What c
 
 ---
 
-**Previous:** [Part 2: Killing the GPU](part-2-killing-the-gpu.md) — zero-GPU pipeline, native Android renderer with ARM SIMD
+**Previous:** [Part 2: Killing the GPU](part-2-killing-the-gpu.md) — zero-GPU pipeline, native Android renderer with ARM SIMD | **Next:** [Part 4: Doubling the Framerate](part-4-doubling-the-framerate.md) — from 29fps to 57fps with a deprecated API
