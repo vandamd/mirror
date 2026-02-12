@@ -40,6 +40,12 @@ private typealias CGDisplayStreamCreateFn = @convention(c) (
 private typealias CGDisplayStreamStartFn = @convention(c) (OpaquePointer) -> Int32
 private typealias CGDisplayStreamStopFn = @convention(c) (OpaquePointer) -> Int32
 
+func adaptiveBackpressureThreshold(rttMs: Double) -> Int {
+    max(2, min(6, Int(120.0 / max(rttMs, 1.0))))
+}
+
+let TRIVIAL_DELTA_THRESHOLD = 512
+
 // MARK: - Screen Capture
 
 class ScreenCapture: NSObject {
@@ -297,7 +303,7 @@ class ScreenCapture: NSObject {
         let isScheduledKeyframe = (frameCount % KEYFRAME_INTERVAL == 0)
 
         let rtt = tcpServer.latencyStats?.rttAvgMs ?? 15.0
-        let adaptiveThreshold = max(2, min(6, Int(120.0 / max(rtt, 1.0))))
+        let adaptiveThreshold = adaptiveBackpressureThreshold(rttMs: rtt)
         if inflight > adaptiveThreshold && !isScheduledKeyframe {
             skippedFrames += 1
             forceNextKeyframe = true
@@ -333,7 +339,7 @@ class ScreenCapture: NSObject {
                 LZ4_compressBound(Int32(pixelCount))
             )
             // Skip trivial deltas — screen barely changed, Android already has the frame
-            if compressedSize < 512 {
+            if compressedSize < TRIVIAL_DELTA_THRESHOLD {
                 skippedFrames += 1
                 frameSequence &-= 1  // reclaim sequence number
             } else {
