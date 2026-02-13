@@ -36,6 +36,7 @@ public class MirrorEngine: ObservableObject {
     @Published public var jitterMs: Double = 0     // SCStream delivery jitter (deviation from expected interval)
     @Published public var rttMs: Double = 0        // Round-trip latency (Mac send → Android ACK)
     @Published public var rttP95Ms: Double = 0     // 95th percentile RTT
+    @Published public var skippedFrames: Int = 0  // Frames skipped due to Android backpressure
     @Published public var sharpenAmount: Double = 1.0 {
         didSet {
             capture?.sharpenAmount = sharpenAmount
@@ -73,7 +74,7 @@ public class MirrorEngine: ObservableObject {
 
     public init() {
         let saved = UserDefaults.standard.string(forKey: "resolution") ?? ""
-        self.resolution = DisplayResolution(rawValue: saved) ?? .comfortable
+        self.resolution = DisplayResolution(rawValue: saved) ?? .sharp
         let savedSharpen = UserDefaults.standard.double(forKey: "sharpenAmount")
         self.sharpenAmount = savedSharpen > 0 ? savedSharpen : 1.0
         let savedContrast = UserDefaults.standard.double(forKey: "contrastAmount")
@@ -269,7 +270,7 @@ public class MirrorEngine: ObservableObject {
         displayManager?.mirrorBuiltInDisplay()
         try? await Task.sleep(for: .seconds(1))
 
-        // 3b. Compositor pacer — forces SCStream to deliver 30fps instead of ~13fps.
+        // 3b. Compositor pacer — forces display compositor to deliver frames at TARGET_FPS.
         // Dirty-pixel window must be on the VIRTUAL display's screen to trigger its compositor.
         let pacer = CompositorPacer(targetDisplayID: displayManager!.displayID)
         pacer.start()
@@ -340,7 +341,7 @@ public class MirrorEngine: ObservableObject {
         )
         cap.sharpenAmount = sharpenAmount
         cap.contrastAmount = contrastAmount
-        cap.onStats = { [weak self] fps, bw, frameKB, total, grey, compress, jitter in
+        cap.onStats = { [weak self] fps, bw, frameKB, total, grey, compress, jitter, skipped in
             DispatchQueue.main.async {
                 self?.fps = fps
                 self?.bandwidth = bw
@@ -349,6 +350,7 @@ public class MirrorEngine: ObservableObject {
                 self?.greyMs = grey
                 self?.compressMs = compress
                 self?.jitterMs = jitter
+                self?.skippedFrames = skipped
             }
         }
         capture = cap

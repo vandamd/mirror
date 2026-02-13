@@ -26,6 +26,7 @@ class TCPServer {
     var lastKeyframeData: Data?
     var onClientCountChanged: ((Int) -> Void)?
     var onLatencyStats: ((LatencyStats) -> Void)?
+    private(set) var latencyStats: LatencyStats?
     var frameWidth: UInt16 = 1024 {
         didSet { lock.lock(); lastKeyframeData = nil; lock.unlock() }
     }
@@ -39,6 +40,15 @@ class TCPServer {
     private let rttWindowSize = 150
     private var totalAcks: Int = 0
     private var lastAckStatsTime: Double = CACurrentMediaTime()
+    private var _inflightFrames: Int = 0
+
+    /// Number of frames sent but not yet ACK'd by Android. Thread-safe (reads rttLock).
+    var inflightFrames: Int {
+        rttLock.lock()
+        let val = _inflightFrames
+        rttLock.unlock()
+        return val
+    }
 
     init(port: UInt16) throws {
         let params = NWParameters.tcp
@@ -60,12 +70,15 @@ class TCPServer {
                 switch state {
                 case .ready:
                     print("[TCP] Client connected")
-                    // Add to connections and notify only when truly ready
                     self.lock.lock()
                     self.connections.append(conn)
                     let count = self.connections.count
                     let cachedKeyframe = self.lastKeyframeData
                     self.lock.unlock()
+                    self.rttLock.lock()
+                    self._inflightFrames = 0
+                    self.sendTimestamps.removeAll()
+                    self.rttLock.unlock()
                     self.onClientCountChanged?(count)
 
                     // Tell client our frame dimensions before sending any frames
@@ -145,6 +158,8 @@ class TCPServer {
             guard let sendTime = sendTimestamps.removeValue(forKey: seq) else {
                 continue
             }
+            _inflightFrames -= 1
+            if _inflightFrames < 0 { _inflightFrames = 0 }
             let rtt = (now - sendTime) * 1000.0
             rttSamples.append(rtt)
             if rttSamples.count > rttWindowSize {
@@ -174,6 +189,7 @@ class TCPServer {
                              stats.rttMs, stats.rttAvgMs, stats.rttP95Ms, stats.rttMinMs, stats.rttMaxMs, stats.acksReceived))
             }
 
+            latencyStats = stats
             onLatencyStats?(stats)
         }
     }
@@ -199,10 +215,14 @@ class TCPServer {
 
         rttLock.lock()
         sendTimestamps[sequenceNumber] = sendTime
+        _inflightFrames += 1
         // Evict old entries to prevent unbounded growth
         if sendTimestamps.count > 300 {
+            let evicted = sendTimestamps.count
             let cutoff = sequenceNumber &- 300
             sendTimestamps = sendTimestamps.filter { $0.key > cutoff }
+            _inflightFrames -= (evicted - sendTimestamps.count)
+            if _inflightFrames < 0 { _inflightFrames = 0 }
         }
         rttLock.unlock()
 
