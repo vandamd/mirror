@@ -9,7 +9,7 @@
   <!-- Open Graph -->
   <meta property="og:title" content="Daylight Mirror">
   <meta property="og:description" content="Turn your Daylight DC-1 into a real-time external display for your Mac. 60 FPS, under 10ms latency, lossless, zero GPU.">
-  <meta property="og:image" content="https://welfvh.github.io/daylight-mirror/images/nighttime-coding.jpg">
+  <meta property="og:image" content="https://welfvh.github.io/daylight-mirror/images/hero-daytime.jpg">
   <meta property="og:url" content="https://welfvh.github.io/daylight-mirror/">
   <meta property="og:type" content="website">
 
@@ -17,7 +17,7 @@
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Daylight Mirror">
   <meta name="twitter:description" content="Turn your Daylight DC-1 into a real-time external display for your Mac.">
-  <meta name="twitter:image" content="https://welfvh.github.io/daylight-mirror/images/nighttime-coding.jpg">
+  <meta name="twitter:image" content="https://welfvh.github.io/daylight-mirror/images/hero-daytime.jpg">
 
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🪞</text></svg>">
 
@@ -598,7 +598,7 @@
   </div>
 
   <button class="theme-toggle" onclick="toggleTheme()" aria-label="Toggle light/dark mode">
-    <span class="theme-icon">☀</span>
+    <span class="theme-icon">☀︎</span>
   </button>
 
   <!-- ════════════════════════════════════════════════════════
@@ -613,7 +613,7 @@
         <a href="https://buy.stripe.com/5kQ7sK1WGf64cFLbyq3Ru06" class="hero-cta">Download — $15 suggested</a>
         <span style="color: var(--muted); font-size: 12px;">Pay what you want ($5+) · or <code style="color: var(--accent); font-size: 11px; background: var(--accent-dim); padding: 1px 5px; border-radius: 3px;">brew install welfvh/tap/daylight-mirror</code></span>
       </div>
-      <img src="images/nighttime-coding.jpg" alt="Daylight DC-1 mirroring a MacBook at night — amber glow, Claude Code on screen" class="hero-image">
+      <img src="images/hero-daytime.jpg" alt="Daylight DC-1 mirroring a MacBook — both screens paper-like" class="hero-image">
     </div>
   </section>
 
@@ -939,7 +939,7 @@
       var next = isLight ? 'dark' : 'light';
       document.documentElement.setAttribute('data-theme', next);
       localStorage.setItem('theme', next);
-      document.querySelector('.theme-icon').textContent = next === 'light' ? '☽' : '☀';
+      document.querySelector('.theme-icon').textContent = next === 'light' ? '◑' : '☀︎';
     }
 
     // Restore saved theme
