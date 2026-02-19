@@ -478,12 +478,15 @@ struct MirrorMenuView: View {
                 }
                 .font(.caption)
                 Spacer()
-                Button("Setup") { showSetup() }
+                Link("Feedback", destination: URL(string: "https://github.com/welfvh/daylight-mirror/issues")!)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .buttonStyle(.plain)
                 Spacer()
-                Link("GitHub", destination: URL(string: "https://github.com/welfvh/daylight-mirror")!)
+                Link("Support", destination: URL(string: "mailto:w+mirror@welf.co")!)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Link("About", destination: URL(string: "https://welf.ai/mirror")!)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
