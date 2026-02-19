@@ -6,6 +6,7 @@ package com.daylight.mirror
 import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
 import android.app.Activity
+import android.content.pm.ActivityInfo
 import android.graphics.Color
 import android.os.Bundle
 import android.os.Handler
@@ -167,6 +168,21 @@ class MirrorActivity : Activity() {
                     }
                     handler.postDelayed(pendingDisconnect!!, 2000)
                 }
+            }
+        }
+    }
+
+    /// Called from native code when resolution changes and orientation needs updating.
+    /// Portrait = h > w, landscape = w >= h.
+    @Suppress("unused")
+    fun setOrientation(portrait: Boolean) {
+        runOnUiThread {
+            requestedOrientation = if (portrait) {
+                android.util.Log.i("DaylightMirror", "Switching to portrait orientation")
+                ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            } else {
+                android.util.Log.i("DaylightMirror", "Switching to landscape orientation")
+                ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
             }
         }
     }

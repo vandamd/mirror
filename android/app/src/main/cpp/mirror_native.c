@@ -770,6 +770,23 @@ static void *decode_thread(void *arg) {
                                     AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM);
                             }
                             LOGI("Resolution → %ux%u (%u pixels)", new_w, new_h, g_pixel_count);
+
+                            // Notify Activity to switch orientation for portrait/landscape
+                            if (g_jvm && g_activity) {
+                                JNIEnv *env2;
+                                int attached2 = 0;
+                                if ((*g_jvm)->GetEnv(g_jvm, (void **)&env2, JNI_VERSION_1_6) != JNI_OK) {
+                                    (*g_jvm)->AttachCurrentThread(g_jvm, &env2, NULL);
+                                    attached2 = 1;
+                                }
+                                jclass cls2 = (*env2)->GetObjectClass(env2, g_activity);
+                                jmethodID mid2 = (*env2)->GetMethodID(env2, cls2, "setOrientation", "(Z)V");
+                                if (mid2) {
+                                    (*env2)->CallVoidMethod(env2, g_activity, mid2,
+                                        (jboolean)(new_h > new_w ? 1 : 0));
+                                }
+                                if (attached2) (*g_jvm)->DetachCurrentThread(g_jvm);
+                            }
                         } else {
                             LOGE("Resolution change allocation failed");
                         }
