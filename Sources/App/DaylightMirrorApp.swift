@@ -692,6 +692,14 @@ struct MirrorMenuView: View {
         .toggleStyle(.switch)
         .controlSize(.small)
 
+        // Auto-dim Mac display when Daylight is connected
+        Toggle(isOn: $engine.autoDimMac) {
+            Label("Dim Mac display", systemImage: "display")
+                .font(.caption)
+        }
+        .toggleStyle(.switch)
+        .controlSize(.small)
+
         Divider()
 
         // Reconnect / Restart / Stop

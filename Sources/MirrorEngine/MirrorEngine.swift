@@ -71,6 +71,10 @@ public class MirrorEngine: ObservableObject {
     @Published public var autoMirrorEnabled: Bool = true {
         didSet { UserDefaults.standard.set(autoMirrorEnabled, forKey: "autoMirrorEnabled") }
     }
+    /// When true, auto-dim the Mac's built-in display when a Daylight client connects.
+    @Published public var autoDimMac: Bool = true {
+        didSet { UserDefaults.standard.set(autoDimMac, forKey: "autoDimMac") }
+    }
 
     public init() {
         let saved = UserDefaults.standard.string(forKey: "resolution") ?? ""
@@ -81,6 +85,9 @@ public class MirrorEngine: ObservableObject {
         self.contrastAmount = savedContrast > 0 ? savedContrast : 1.0
         if UserDefaults.standard.object(forKey: "autoMirrorEnabled") != nil {
             self.autoMirrorEnabled = UserDefaults.standard.bool(forKey: "autoMirrorEnabled")
+        }
+        if UserDefaults.standard.object(forKey: "autoDimMac") != nil {
+            self.autoDimMac = UserDefaults.standard.bool(forKey: "autoDimMac")
         }
         NSLog("[MirrorEngine] init, resolution: %@, sharpen: %.1f, contrast: %.1f",
               resolution.rawValue, sharpenAmount, contrastAmount)
@@ -287,17 +294,19 @@ public class MirrorEngine: ObservableObject {
                     self?.clientCount = count
 
                     // Auto-dim Mac when Daylight connects, restore when it disconnects
-                    if count > 0 && !wasConnected {
-                        if let current = MacBrightness.get() {
-                            self?.savedMacBrightness = current
-                            MacBrightness.set(0)
-                            print("[Mac] Auto-dimmed (was \(current))")
-                        }
-                    } else if count == 0 && wasConnected {
-                        if let saved = self?.savedMacBrightness {
-                            MacBrightness.set(saved)
-                            self?.savedMacBrightness = nil
-                            print("[Mac] Brightness restored to \(saved)")
+                    if self?.autoDimMac == true {
+                        if count > 0 && !wasConnected {
+                            if let current = MacBrightness.get() {
+                                self?.savedMacBrightness = current
+                                MacBrightness.set(0)
+                                print("[Mac] Auto-dimmed (was \(current))")
+                            }
+                        } else if count == 0 && wasConnected {
+                            if let saved = self?.savedMacBrightness {
+                                MacBrightness.set(saved)
+                                self?.savedMacBrightness = nil
+                                print("[Mac] Brightness restored to \(saved)")
+                            }
                         }
                     }
                 }
@@ -462,7 +471,7 @@ public class MirrorEngine: ObservableObject {
         if status == .waitingForDevice { status = .idle; return }
         DispatchQueue.main.async { self.status = .stopping }
 
-        // Restore Mac brightness before tearing down
+        // Restore Mac brightness before tearing down (even if toggle was turned off mid-session)
         if let saved = savedMacBrightness {
             MacBrightness.set(saved)
             savedMacBrightness = nil

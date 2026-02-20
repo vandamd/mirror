@@ -40,6 +40,11 @@ class TCPServer {
         }
     }
 
+    // Last-sent display state — re-sent to new clients on connect so
+    // brightness/warmth don't reset to defaults after a reconnect.
+    private var lastBrightness: UInt8 = 128
+    private var lastWarmth: UInt8 = 128
+
     private var sendTimestamps: [UInt32: Double] = [:]
     private let rttLock = NSLock()
     private var rttSamples: [Double] = []
@@ -87,8 +92,9 @@ class TCPServer {
                     self.rttLock.unlock()
                     self.onClientCountChanged?(count)
 
-                    // Tell client our frame dimensions before sending any frames
+                    // Tell client our frame dimensions and display state before sending frames
                     self.sendResolution(to: conn)
+                    self.sendDisplayState(to: conn)
 
                     if let kf = cachedKeyframe {
                         conn.send(content: kf, completion: .contentProcessed { _ in })
@@ -238,6 +244,10 @@ class TCPServer {
     }
 
     func sendCommand(_ cmd: UInt8, value: UInt8) {
+        // Track state so we can re-send on client reconnect
+        if cmd == CMD_BRIGHTNESS { lastBrightness = value }
+        if cmd == CMD_WARMTH { lastWarmth = value }
+
         var packet = Data(capacity: 4)
         packet.append(contentsOf: MAGIC_CMD)
         packet.append(cmd)
@@ -260,6 +270,17 @@ class TCPServer {
         for conn in conns {
             sendResolution(to: conn)
         }
+    }
+
+    /// Re-send current brightness/warmth to a specific client on (re)connect
+    /// so the Daylight doesn't revert to defaults.
+    func sendDisplayState(to conn: NWConnection) {
+        var bPkt = Data(capacity: 4)
+        bPkt.append(contentsOf: MAGIC_CMD)
+        bPkt.append(CMD_BRIGHTNESS)
+        bPkt.append(lastBrightness)
+        conn.send(content: bPkt, completion: .contentProcessed { _ in })
+        print("[TCP] Sent brightness: \(self.lastBrightness)")
     }
 
     /// Send resolution command to a specific client: [DA 7F] [04] [w:2 LE] [h:2 LE]
