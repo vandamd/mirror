@@ -31,6 +31,8 @@ class DisplayController {
             if let val = ADBBridge.querySystemSetting("screen_brightness") {
                 self.currentBrightness = val
                 self.savedBrightness = val
+                // Sync to TCPServer so reconnecting clients get the correct value
+                self.tcpServer.sendCommand(CMD_BRIGHTNESS, value: UInt8(val))
                 self.onBrightnessChanged?(val)
                 print("[Display] Daylight brightness: \(val)/255")
             }
