@@ -38,16 +38,10 @@ public class MirrorEngine: ObservableObject {
     @Published public var rttP95Ms: Double = 0     // 95th percentile RTT
     @Published public var skippedFrames: Int = 0  // Frames skipped due to Android backpressure
     @Published public var sharpenAmount: Double = 1.0 {
-        didSet {
-            capture?.sharpenAmount = sharpenAmount
-            UserDefaults.standard.set(sharpenAmount, forKey: "sharpenAmount")
-        }
+        didSet { UserDefaults.standard.set(sharpenAmount, forKey: "sharpenAmount") }
     }
     @Published public var contrastAmount: Double = 1.0 {
-        didSet {
-            capture?.contrastAmount = contrastAmount
-            UserDefaults.standard.set(contrastAmount, forKey: "contrastAmount")
-        }
+        didSet { UserDefaults.standard.set(contrastAmount, forKey: "contrastAmount") }
     }
     @Published public var fontSmoothingDisabled: Bool = false
     @Published public var deviceDetected: Bool = false
@@ -348,8 +342,6 @@ public class MirrorEngine: ObservableObject {
             targetDisplayID: displayManager!.displayID,
             width: Int(w), height: Int(h)
         )
-        cap.sharpenAmount = sharpenAmount
-        cap.contrastAmount = contrastAmount
         cap.onStats = { [weak self] fps, bw, frameKB, total, grey, compress, jitter, skipped in
             DispatchQueue.main.async {
                 self?.fps = fps

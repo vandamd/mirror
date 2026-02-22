@@ -1,17 +1,19 @@
-// mirror_native.c — Daylight Mirror native renderer.
+// mirror_native.c — Daylight Mirror native receiver with MediaCodec H.264 decode.
 //
-// Receives LZ4+delta compressed greyscale frames over TCP,
-// decompresses, applies delta, and writes directly to ANativeWindow.
-// Entire hot path is C — no JNI calls, no Java GC, no GPU.
+// Receives H.264 Annex B NAL units over TCP (ADB reverse tunnel),
+// feeds them into a MediaCodec hardware decoder configured with a Surface,
+// and lets the hardware compositor render directly — zero CPU copy in the hot path.
 //
-// Protocol: [0xDA 0x7E] [flags:1B] [seq:4B LE] [length:4B LE] [LZ4 payload]
-//   flags bit 0: 1=keyframe, 0=delta (XOR with previous)
-// ACK:      [0xDA 0x7A] [seq:4B LE] — sent back after rendering each frame
+// Protocol: [0xDA 0x7E] [flags:1B] [seq:4B LE] [length:4B LE] [H.264 Annex B payload]
+//   flags bit 0: 1=IDR (keyframe), 0=inter frame
+// ACK:      [0xDA 0x7A] [seq:4B LE] — sent back after each frame is queued to decoder
 
 #include <jni.h>
 #include <android/native_window.h>
 #include <android/native_window_jni.h>
 #include <android/log.h>
+#include <media/NdkMediaCodec.h>
+#include <media/NdkMediaFormat.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -21,33 +23,11 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
-#include <arm_neon.h>
-#include <EGL/egl.h>
-#include <EGL/eglext.h>
-#include <GLES3/gl3.h>
-#include <android/hardware_buffer.h>
 #include <sys/resource.h>
-
-#include "lz4.h"
-
-#ifndef AHARDWAREBUFFER_FORMAT_R8_UNORM
-#define AHARDWAREBUFFER_FORMAT_R8_UNORM 0x38
-#endif
 
 #define TAG "DaylightMirror"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
-
-static void set_thread_realtime(const char *name) {
-    struct sched_param param;
-    param.sched_priority = sched_get_priority_max(SCHED_FIFO);
-    if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &param) != 0) {
-        setpriority(PRIO_PROCESS, 0, -10);
-        LOGI("%s: SCHED_FIFO unavailable, using nice=-10", name);
-    } else {
-        LOGI("%s: SCHED_FIFO priority %d", name, param.sched_priority);
-    }
-}
 
 // Default resolution (updated dynamically via CMD_RESOLUTION from server)
 #define DEFAULT_FRAME_W 1024
@@ -65,7 +45,6 @@ static void set_thread_realtime(const char *name) {
 // Global state
 static ANativeWindow *g_window = NULL;
 static pthread_t g_decode_thread;
-static pthread_t g_render_thread;
 static volatile int g_running = 0;
 static JavaVM *g_jvm = NULL;
 static jobject g_activity = NULL;
@@ -73,348 +52,28 @@ static char g_host[64] = "127.0.0.1";
 static int g_port = 8888;
 static int g_sock = -1;
 
-// Dynamic frame dimensions (set by CMD_RESOLUTION before first frame)
 static uint32_t g_frame_w = DEFAULT_FRAME_W;
 static uint32_t g_frame_h = DEFAULT_FRAME_H;
-static uint32_t g_pixel_count = DEFAULT_FRAME_W * DEFAULT_FRAME_H;
-static uint32_t g_max_compressed = DEFAULT_FRAME_W * DEFAULT_FRAME_H + 256;
 
-// Frame buffers (allocated once, reused — reallocated on resolution change)
-static uint8_t *g_current_frame = NULL;   // Decompressed greyscale pixels
-static uint8_t *g_compressed_buf = NULL;  // Incoming compressed data
+// Receive buffer — reused across frames
+static uint8_t *g_nal_buf = NULL;
+static uint32_t g_nal_buf_capacity = 0;
 
-static pthread_mutex_t g_frame_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t g_frame_cond = PTHREAD_COND_INITIALIZER;
-static uint8_t *g_render_frames[2] = {NULL, NULL};
-static int g_ready_index = 0;
-static int g_has_ready_frame = 0;
-static uint32_t g_ready_seq = 0;
-static int g_overwritten_frames = 0;
-static double g_render_neon_sum = 0.0;
-static double g_render_vsync_sum = 0.0;
-static int g_render_stat_frames = 0;
+// MediaCodec decoder
+static AMediaCodec *g_codec = NULL;
+static pthread_mutex_t g_codec_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-static EGLDisplay g_egl_display = EGL_NO_DISPLAY;
-static EGLSurface g_egl_surface = EGL_NO_SURFACE;
-static EGLContext g_egl_context = EGL_NO_CONTEXT;
-static GLuint g_gl_program = 0;
-static GLuint g_gl_texture = 0;
-static GLuint g_gl_vbo = 0;
-static GLuint g_gl_pbos[2] = {0, 0};  // Double-buffered PBOs for async upload
-static int g_gl_pbo_index = 0;        // PBO currently being written by CPU
-static uint32_t g_gl_pbo_size = 0;    // Allocated PBO size in bytes
-static int g_gl_pbo_primed = 0;       // Both PBOs filled at least once
-static GLint g_gl_attr_position = -1;
-static GLint g_gl_attr_texcoord = -1;
-static GLint g_gl_uniform_texture = -1;
-static uint32_t g_gl_tex_w = 0;
-static uint32_t g_gl_tex_h = 0;
-static int g_gl_ready = 0;
-
-static const char *k_vertex_shader_src =
-    "#version 300 es\n"
-    "in vec4 a_position;\n"
-    "in vec2 a_texcoord;\n"
-    "out vec2 v_texcoord;\n"
-    "void main() {\n"
-    "    gl_Position = a_position;\n"
-    "    v_texcoord = a_texcoord;\n"
-    "}\n";
-
-static const char *k_fragment_shader_src =
-    "#version 300 es\n"
-    "precision mediump float;\n"
-    "in vec2 v_texcoord;\n"
-    "uniform sampler2D u_texture;\n"
-    "out vec4 fragColor;\n"
-    "void main() {\n"
-    "    float grey = texture(u_texture, v_texcoord).r;\n"
-    "    fragColor = vec4(grey, grey, grey, 1.0);\n"
-    "}\n";
-
-static void gl_teardown(void);
-
-static GLuint gl_compile_shader(GLenum type, const char *source) {
-    GLuint shader = glCreateShader(type);
-    if (!shader) {
-        LOGE("glCreateShader failed: %u", (unsigned)type);
-        return 0;
-    }
-
-    glShaderSource(shader, 1, &source, NULL);
-    glCompileShader(shader);
-
-    GLint compiled = GL_FALSE;
-    glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
-    if (compiled != GL_TRUE) {
-        char info_log[512];
-        GLsizei log_len = 0;
-        glGetShaderInfoLog(shader, sizeof(info_log), &log_len, info_log);
-        LOGE("Shader compile failed: %s", info_log);
-        glDeleteShader(shader);
-        return 0;
-    }
-
-    return shader;
-}
-
-static int gl_create_program(void) {
-    GLuint vertex_shader = gl_compile_shader(GL_VERTEX_SHADER, k_vertex_shader_src);
-    GLuint fragment_shader = gl_compile_shader(GL_FRAGMENT_SHADER, k_fragment_shader_src);
-    if (!vertex_shader || !fragment_shader) {
-        if (vertex_shader) glDeleteShader(vertex_shader);
-        if (fragment_shader) glDeleteShader(fragment_shader);
-        return 0;
-    }
-
-    g_gl_program = glCreateProgram();
-    if (!g_gl_program) {
-        LOGE("glCreateProgram failed");
-        glDeleteShader(vertex_shader);
-        glDeleteShader(fragment_shader);
-        return 0;
-    }
-
-    glAttachShader(g_gl_program, vertex_shader);
-    glAttachShader(g_gl_program, fragment_shader);
-    glLinkProgram(g_gl_program);
-
-    GLint linked = GL_FALSE;
-    glGetProgramiv(g_gl_program, GL_LINK_STATUS, &linked);
-    glDeleteShader(vertex_shader);
-    glDeleteShader(fragment_shader);
-
-    if (linked != GL_TRUE) {
-        char info_log[512];
-        GLsizei log_len = 0;
-        glGetProgramInfoLog(g_gl_program, sizeof(info_log), &log_len, info_log);
-        LOGE("Program link failed: %s", info_log);
-        glDeleteProgram(g_gl_program);
-        g_gl_program = 0;
-        return 0;
-    }
-
-    g_gl_attr_position = glGetAttribLocation(g_gl_program, "a_position");
-    g_gl_attr_texcoord = glGetAttribLocation(g_gl_program, "a_texcoord");
-    g_gl_uniform_texture = glGetUniformLocation(g_gl_program, "u_texture");
-    if (g_gl_attr_position < 0 || g_gl_attr_texcoord < 0 || g_gl_uniform_texture < 0) {
-        LOGE("GL attribute/uniform lookup failed");
-        return 0;
-    }
-
-    return 1;
-}
-
-static int gl_create_texture(uint32_t width, uint32_t height) {
-    if (g_gl_texture) {
-        glDeleteTextures(1, &g_gl_texture);
-        g_gl_texture = 0;
-    }
-
-    glGenTextures(1, &g_gl_texture);
-    if (!g_gl_texture) {
-        LOGE("glGenTextures failed");
-        return 0;
-    }
-
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, g_gl_texture);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, (GLsizei)width, (GLsizei)height,
-                 0, GL_RED, GL_UNSIGNED_BYTE, NULL);
-
-    if (glGetError() != GL_NO_ERROR) {
-        LOGE("glTexImage2D failed for %ux%u", width, height);
-        glDeleteTextures(1, &g_gl_texture);
-        g_gl_texture = 0;
-        return 0;
-    }
-
-    g_gl_tex_w = width;
-    g_gl_tex_h = height;
-
-    // Resize PBOs to match new texture dimensions
-    uint32_t new_pbo_size = width * height;
-    if (g_gl_pbos[0] && new_pbo_size != g_gl_pbo_size) {
-        for (int i = 0; i < 2; i++) {
-            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, g_gl_pbos[i]);
-            glBufferData(GL_PIXEL_UNPACK_BUFFER, new_pbo_size, NULL, GL_STREAM_DRAW);
-        }
-        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-        g_gl_pbo_size = new_pbo_size;
-    }
-    return 1;
-}
-
-static int gl_init(ANativeWindow *window) {
-    if (!window) return 0;
-    if (g_gl_ready) return 1;
-
-    const EGLint config_attribs[] = {
-        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
-        EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
-        EGL_RED_SIZE, 8,
-        EGL_GREEN_SIZE, 8,
-        EGL_BLUE_SIZE, 8,
-        EGL_ALPHA_SIZE, 8,
-        EGL_NONE
-    };
-    const EGLint context_attribs[] = {
-        EGL_CONTEXT_CLIENT_VERSION, 3,
-        EGL_NONE
-    };
-    static const GLfloat quad_vertices[] = {
-        -1.0f, -1.0f, 0.0f, 1.0f,
-         1.0f, -1.0f, 1.0f, 1.0f,
-        -1.0f,  1.0f, 0.0f, 0.0f,
-        -1.0f,  1.0f, 0.0f, 0.0f,
-         1.0f, -1.0f, 1.0f, 1.0f,
-         1.0f,  1.0f, 1.0f, 0.0f,
-    };
-
-    g_egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-    if (g_egl_display == EGL_NO_DISPLAY) {
-        LOGE("eglGetDisplay failed");
-        goto fail;
-    }
-
-    if (!eglInitialize(g_egl_display, NULL, NULL)) {
-        LOGE("eglInitialize failed: 0x%x", eglGetError());
-        goto fail;
-    }
-
-    EGLConfig config;
-    EGLint num_configs = 0;
-    if (!eglChooseConfig(g_egl_display, config_attribs, &config, 1, &num_configs) || num_configs < 1) {
-        LOGE("eglChooseConfig failed: 0x%x", eglGetError());
-        goto fail;
-    }
-
-    g_egl_surface = eglCreateWindowSurface(g_egl_display, config, window, NULL);
-    if (g_egl_surface == EGL_NO_SURFACE) {
-        LOGE("eglCreateWindowSurface failed: 0x%x", eglGetError());
-        goto fail;
-    }
-
-    g_egl_context = eglCreateContext(g_egl_display, config, EGL_NO_CONTEXT, context_attribs);
-    if (g_egl_context == EGL_NO_CONTEXT) {
-        LOGE("eglCreateContext failed: 0x%x", eglGetError());
-        goto fail;
-    }
-
-    if (!eglMakeCurrent(g_egl_display, g_egl_surface, g_egl_surface, g_egl_context)) {
-        LOGE("eglMakeCurrent failed: 0x%x", eglGetError());
-        goto fail;
-    }
-
-    eglSwapInterval(g_egl_display, 0);
-
-    if (!gl_create_program()) goto fail;
-
-    glUseProgram(g_gl_program);
-    glUniform1i(g_gl_uniform_texture, 0);
-
-    glGenBuffers(1, &g_gl_vbo);
-    if (!g_gl_vbo) {
-        LOGE("glGenBuffers failed");
-        goto fail;
-    }
-    glBindBuffer(GL_ARRAY_BUFFER, g_gl_vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(quad_vertices), quad_vertices, GL_STATIC_DRAW);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-
-    if (!gl_create_texture(g_frame_w, g_frame_h)) goto fail;
-
-    // Allocate double-buffered PBOs for async CPU→GPU texture upload
-    {
-        uint32_t pbo_size = g_frame_w * g_frame_h;
-        glGenBuffers(2, g_gl_pbos);
-        if (!g_gl_pbos[0] || !g_gl_pbos[1]) {
-            LOGE("glGenBuffers PBO failed");
-            goto fail;
-        }
-        for (int i = 0; i < 2; i++) {
-            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, g_gl_pbos[i]);
-            glBufferData(GL_PIXEL_UNPACK_BUFFER, pbo_size, NULL, GL_STREAM_DRAW);
-        }
-        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-        g_gl_pbo_size = pbo_size;
-        g_gl_pbo_index = 0;
-        LOGI("PBO allocated: 2x %u bytes (%.1f MB)", pbo_size, pbo_size / 1048576.0f);
-    }
-
-    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-    g_gl_ready = 1;
-    return 1;
-
-fail:
-    gl_teardown();
-    return 0;
-}
-
-static int gl_ensure_texture_size(uint32_t width, uint32_t height) {
-    if (!g_gl_ready) return 0;
-    if (g_gl_texture && g_gl_tex_w == width && g_gl_tex_h == height) return 1;
-    return gl_create_texture(width, height);
-}
-
-static void gl_teardown(void) {
-    if (g_egl_display != EGL_NO_DISPLAY && g_egl_surface != EGL_NO_SURFACE && g_egl_context != EGL_NO_CONTEXT) {
-        eglMakeCurrent(g_egl_display, g_egl_surface, g_egl_surface, g_egl_context);
-        if (g_gl_texture) {
-            glDeleteTextures(1, &g_gl_texture);
-            g_gl_texture = 0;
-        }
-        if (g_gl_pbos[0]) {
-            glDeleteBuffers(2, g_gl_pbos);
-            g_gl_pbos[0] = g_gl_pbos[1] = 0;
-            g_gl_pbo_size = 0;
-        }
-        if (g_gl_vbo) {
-            glDeleteBuffers(1, &g_gl_vbo);
-            g_gl_vbo = 0;
-        }
-        if (g_gl_program) {
-            glDeleteProgram(g_gl_program);
-            g_gl_program = 0;
-        }
-        eglMakeCurrent(g_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+static void set_thread_realtime(const char *name) {
+    struct sched_param param;
+    param.sched_priority = sched_get_priority_max(SCHED_FIFO);
+    if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &param) != 0) {
+        setpriority(PRIO_PROCESS, 0, -10);
+        LOGI("%s: SCHED_FIFO unavailable, using nice=-10", name);
     } else {
-        g_gl_texture = 0;
-        g_gl_pbos[0] = g_gl_pbos[1] = 0;
-        g_gl_pbo_size = 0;
-        g_gl_vbo = 0;
-        g_gl_program = 0;
+        LOGI("%s: SCHED_FIFO priority %d", name, param.sched_priority);
     }
-
-    if (g_egl_display != EGL_NO_DISPLAY) {
-        if (g_egl_context != EGL_NO_CONTEXT) {
-            eglDestroyContext(g_egl_display, g_egl_context);
-        }
-        if (g_egl_surface != EGL_NO_SURFACE) {
-            eglDestroySurface(g_egl_display, g_egl_surface);
-        }
-        eglTerminate(g_egl_display);
-    }
-
-    g_egl_display = EGL_NO_DISPLAY;
-    g_egl_surface = EGL_NO_SURFACE;
-    g_egl_context = EGL_NO_CONTEXT;
-    g_gl_attr_position = -1;
-    g_gl_attr_texcoord = -1;
-    g_gl_uniform_texture = -1;
-    g_gl_tex_w = 0;
-    g_gl_tex_h = 0;
-    g_gl_pbo_index = 0;
-    g_gl_pbo_primed = 0;
-    g_gl_ready = 0;
 }
 
-// Read exactly n bytes from socket (handles partial reads)
 static int read_exact(int sock, void *buf, int n) {
     int total = 0;
     while (total < n) {
@@ -425,89 +84,8 @@ static int read_exact(int sock, void *buf, int n) {
     return total;
 }
 
-static void apply_delta_neon(uint8_t *frame, const uint8_t *delta, int count) {
-    int i = 0;
-    for (; i + 64 <= count; i += 64) {
-        __builtin_prefetch(frame + i + 64, 1, 1);
-        __builtin_prefetch(delta + i + 64, 0, 1);
-        uint8x16_t f0 = vld1q_u8(frame + i);
-        uint8x16_t f1 = vld1q_u8(frame + i + 16);
-        uint8x16_t f2 = vld1q_u8(frame + i + 32);
-        uint8x16_t f3 = vld1q_u8(frame + i + 48);
-        uint8x16_t d0 = vld1q_u8(delta + i);
-        uint8x16_t d1 = vld1q_u8(delta + i + 16);
-        uint8x16_t d2 = vld1q_u8(delta + i + 32);
-        uint8x16_t d3 = vld1q_u8(delta + i + 48);
-        vst1q_u8(frame + i, veorq_u8(f0, d0));
-        vst1q_u8(frame + i + 16, veorq_u8(f1, d1));
-        vst1q_u8(frame + i + 32, veorq_u8(f2, d2));
-        vst1q_u8(frame + i + 48, veorq_u8(f3, d3));
-    }
-
-    for (; i + 16 <= count; i += 16) {
-        uint8x16_t f = vld1q_u8(frame + i);
-        uint8x16_t d = vld1q_u8(delta + i);
-        vst1q_u8(frame + i, veorq_u8(f, d));
-    }
-    // Remaining bytes
-    for (; i < count; i++) {
-        frame[i] ^= delta[i];
-    }
-}
-
-// Write greyscale directly to ANativeWindow in R8_UNORM format (1 byte/pixel).
-// Falls back to RGBX expansion if R8 is not supported.
-static int g_r8_supported = 0;  // R8_UNORM not compositable by SurfaceFlinger on DC-1
-
-static void blit_grey_to_surface(ANativeWindow *window, const uint8_t *grey) {
-    ANativeWindow_Buffer buffer;
-    if (ANativeWindow_lock(window, &buffer, NULL) != 0) {
-        LOGE("ANativeWindow_lock failed");
-        return;
-    }
-
-    uint8_t *dst = (uint8_t *)buffer.bits;
-    int fw = (int)g_frame_w;
-    int fh = (int)g_frame_h;
-
-    if (g_r8_supported) {
-        if (buffer.stride == fw && fw <= buffer.width && fh <= buffer.height) {
-            memcpy(dst, grey, (size_t)fw * fh);
-        } else {
-            int dst_stride = buffer.stride;
-            for (int y = 0; y < fh && y < buffer.height; y++) {
-                int w = fw < buffer.width ? fw : buffer.width;
-                memcpy(dst + y * dst_stride, grey + y * fw, w);
-            }
-        }
-    } else {
-        // Fallback: RGBX_8888 (4 bytes per pixel) with NEON expansion
-        int dst_stride = buffer.stride * 4;
-        for (int y = 0; y < fh && y < buffer.height; y++) {
-            uint8_t *row = dst + y * dst_stride;
-            const uint8_t *src = grey + y * fw;
-            int x = 0;
-            for (; x + 16 <= fw && x + 16 <= buffer.width; x += 16) {
-                uint8x16_t g = vld1q_u8(src + x);
-                uint8x16_t ff = vdupq_n_u8(0xFF);
-                uint8x16x4_t rgbx;
-                rgbx.val[0] = g;
-                rgbx.val[1] = g;
-                rgbx.val[2] = g;
-                rgbx.val[3] = ff;
-                vst4q_u8(row + x * 4, rgbx);
-            }
-            for (; x < fw && x < buffer.width; x++) {
-                uint8_t v = src[x];
-                row[x * 4 + 0] = v;
-                row[x * 4 + 1] = v;
-                row[x * 4 + 2] = v;
-                row[x * 4 + 3] = 0xFF;
-            }
-        }
-    }
-
-    ANativeWindow_unlockAndPost(window);
+static double ms_diff(struct timespec a, struct timespec b) {
+    return ((b.tv_sec - a.tv_sec) * 1000.0) + ((b.tv_nsec - a.tv_nsec) / 1e6);
 }
 
 static void send_ack(int sock, uint32_t seq) {
@@ -519,10 +97,6 @@ static void send_ack(int sock, uint32_t seq) {
     ack[4] = (uint8_t)((seq >> 16) & 0xFF);
     ack[5] = (uint8_t)((seq >> 24) & 0xFF);
     send(sock, ack, 6, MSG_NOSIGNAL);
-}
-
-static double ms_diff(struct timespec a, struct timespec b) {
-    return ((b.tv_sec - a.tv_sec) * 1000.0) + ((b.tv_nsec - a.tv_nsec) / 1e6);
 }
 
 static void notify_connection_state(int connected) {
@@ -539,258 +113,115 @@ static void notify_connection_state(int connected) {
     if (attached) (*g_jvm)->DetachCurrentThread(g_jvm);
 }
 
-static void publish_frame(const uint8_t *frame, uint32_t seq) {
-    if (!frame) return;
-    pthread_mutex_lock(&g_frame_mutex);
-
-    const int write_index = (g_ready_index == 0) ? 1 : 0;
-    if (g_render_frames[write_index]) {
-        memcpy(g_render_frames[write_index], frame, g_pixel_count);
-        if (g_has_ready_frame) g_overwritten_frames += 1;
-        g_ready_index = write_index;
-        g_ready_seq = seq;
-        g_has_ready_frame = 1;
-        pthread_cond_signal(&g_frame_cond);
-    }
-    pthread_mutex_unlock(&g_frame_mutex);
-}
-
-static int reallocate_buffers(uint32_t new_w, uint32_t new_h, uint8_t **decompress_buf) {
-    uint32_t new_pixels = new_w * new_h;
-    uint32_t new_max_compressed = new_pixels + 256;
-
-    uint8_t *new_current = (uint8_t *)calloc(new_pixels, 1);
-    uint8_t *new_compressed = (uint8_t *)malloc(new_max_compressed);
-    uint8_t *new_decompress = (uint8_t *)malloc(new_pixels);
-    uint8_t *new_render0 = (uint8_t *)malloc(new_pixels);
-    uint8_t *new_render1 = (uint8_t *)malloc(new_pixels);
-
-    if (!new_current || !new_compressed || !new_decompress || !new_render0 || !new_render1) {
-        free(new_current);
-        free(new_compressed);
-        free(new_decompress);
-        free(new_render0);
-        free(new_render1);
+// Create and start a MediaCodec H.264 decoder targeting the given Surface.
+// Returns 0 on failure, 1 on success.
+static int create_decoder(ANativeWindow *window, uint32_t width, uint32_t height) {
+    AMediaCodec *codec = AMediaCodec_createDecoderByType("video/avc");
+    if (!codec) {
+        LOGE("AMediaCodec_createDecoderByType failed");
         return 0;
     }
 
-    pthread_mutex_lock(&g_frame_mutex);
-    free(g_current_frame);
-    free(g_compressed_buf);
-    free(*decompress_buf);
-    free(g_render_frames[0]);
-    free(g_render_frames[1]);
+    AMediaFormat *fmt = AMediaFormat_new();
+    AMediaFormat_setString(fmt, AMEDIAFORMAT_KEY_MIME, "video/avc");
+    AMediaFormat_setInt32(fmt, AMEDIAFORMAT_KEY_WIDTH, (int32_t)width);
+    AMediaFormat_setInt32(fmt, AMEDIAFORMAT_KEY_HEIGHT, (int32_t)height);
+    // Low latency mode (API 30+) — reduces decoder-side buffering
+    AMediaFormat_setInt32(fmt, "low-latency", 1);
 
-    g_current_frame = new_current;
-    g_compressed_buf = new_compressed;
-    *decompress_buf = new_decompress;
-    g_render_frames[0] = new_render0;
-    g_render_frames[1] = new_render1;
-    memset(g_render_frames[0], 0xFF, new_pixels);
-    memset(g_render_frames[1], 0xFF, new_pixels);
-    g_ready_index = 0;
-    g_has_ready_frame = 0;
+    media_status_t status = AMediaCodec_configure(codec, fmt, window, NULL, 0);
+    AMediaFormat_delete(fmt);
+    if (status != AMEDIA_OK) {
+        LOGE("AMediaCodec_configure failed: %d", status);
+        AMediaCodec_delete(codec);
+        return 0;
+    }
 
-    g_frame_w = new_w;
-    g_frame_h = new_h;
-    g_pixel_count = new_pixels;
-    g_max_compressed = new_max_compressed;
-    pthread_mutex_unlock(&g_frame_mutex);
+    status = AMediaCodec_start(codec);
+    if (status != AMEDIA_OK) {
+        LOGE("AMediaCodec_start failed: %d", status);
+        AMediaCodec_delete(codec);
+        return 0;
+    }
+
+    pthread_mutex_lock(&g_codec_mutex);
+    if (g_codec) {
+        AMediaCodec_stop(g_codec);
+        AMediaCodec_delete(g_codec);
+    }
+    g_codec = codec;
+    g_frame_w = width;
+    g_frame_h = height;
+    pthread_mutex_unlock(&g_codec_mutex);
+
+    LOGI("MediaCodec H.264 decoder started: %ux%u", width, height);
     return 1;
 }
 
-static void *render_thread(void *arg) {
-    (void)arg;
-    set_thread_realtime("render_thread");
-    uint8_t *render_local = NULL;
-    uint32_t render_capacity = 0;
-    uint32_t render_w = 0;
-    uint32_t render_h = 0;
-    int gl_disabled = 0;
+static void destroy_decoder(void) {
+    pthread_mutex_lock(&g_codec_mutex);
+    if (g_codec) {
+        AMediaCodec_stop(g_codec);
+        AMediaCodec_delete(g_codec);
+        g_codec = NULL;
+    }
+    pthread_mutex_unlock(&g_codec_mutex);
+}
 
-    while (g_running) {
-        pthread_mutex_lock(&g_frame_mutex);
-        while (g_running && !g_has_ready_frame) {
-            pthread_cond_wait(&g_frame_cond, &g_frame_mutex);
-        }
-        if (!g_running) {
-            pthread_mutex_unlock(&g_frame_mutex);
-            break;
-        }
+// Feed one NAL unit buffer into the decoder, render output to Surface.
+// Returns 0 on fatal error.
+static int feed_nal(const uint8_t *data, size_t len, int is_idr, uint32_t seq, int sock,
+                    double *out_decode_ms) {
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
 
-        const int frame_index = g_ready_index;
-        uint32_t local_pixels = g_pixel_count;
-        render_w = g_frame_w;
-        render_h = g_frame_h;
-
-        if (local_pixels > render_capacity) {
-            uint8_t *resized = (uint8_t *)realloc(render_local, local_pixels);
-            if (!resized) {
-                g_has_ready_frame = 0;
-                pthread_mutex_unlock(&g_frame_mutex);
-                continue;
-            }
-            render_local = resized;
-            render_capacity = local_pixels;
-        }
-
-        memcpy(render_local, g_render_frames[frame_index], local_pixels);
-        g_has_ready_frame = 0;
-        pthread_mutex_unlock(&g_frame_mutex);
-
-        struct timespec t4a, t4b, t5;
-        if (g_window && render_local) {
-            int did_present = 0;
-
-            if (!gl_disabled) {
-                if (!g_gl_ready && !gl_init(g_window)) {
-                    LOGE("GL init failed, falling back to CPU blit");
-                    gl_disabled = 1;
-                }
-
-                if (g_gl_ready && !gl_ensure_texture_size(render_w, render_h)) {
-                    LOGE("GL texture resize failed for %ux%u", render_w, render_h);
-                    gl_teardown();
-                    gl_disabled = 1;
-                }
-
-                if (g_gl_ready) {
-                    EGLint surface_w = 0;
-                    EGLint surface_h = 0;
-                    eglQuerySurface(g_egl_display, g_egl_surface, EGL_WIDTH, &surface_w);
-                    eglQuerySurface(g_egl_display, g_egl_surface, EGL_HEIGHT, &surface_h);
-                    if (surface_w > 0 && surface_h > 0) {
-                        glViewport(0, 0, surface_w, surface_h);
-                    }
-
-                    glUseProgram(g_gl_program);
-                    glActiveTexture(GL_TEXTURE0);
-                    glBindTexture(GL_TEXTURE_2D, g_gl_texture);
-                    glBindBuffer(GL_ARRAY_BUFFER, g_gl_vbo);
-                    glEnableVertexAttribArray((GLuint)g_gl_attr_position);
-                    glEnableVertexAttribArray((GLuint)g_gl_attr_texcoord);
-                    glVertexAttribPointer((GLuint)g_gl_attr_position, 2, GL_FLOAT, GL_FALSE,
-                                          4 * sizeof(GLfloat), (const void *)0);
-                    glVertexAttribPointer((GLuint)g_gl_attr_texcoord, 2, GL_FLOAT, GL_FALSE,
-                                          4 * sizeof(GLfloat), (const void *)(2 * sizeof(GLfloat)));
-
-                    clock_gettime(CLOCK_MONOTONIC, &t4a);
-
-                    if (g_gl_pbos[0] && g_gl_pbo_size == render_w * render_h && g_gl_pbo_primed) {
-                        // Double-buffered PBO upload:
-                        //   pbo_index    → bind for glTexSubImage2D (GPU reads from it, async DMA)
-                        //   1-pbo_index  → map and memcpy new frame data into it (CPU write)
-                        int upload_pbo = g_gl_pbo_index;
-                        int fill_pbo   = 1 - g_gl_pbo_index;
-
-                        // Kick off GPU upload from the previously-filled PBO
-                        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, g_gl_pbos[upload_pbo]);
-                        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
-                                        (GLsizei)render_w, (GLsizei)render_h,
-                                        GL_RED, GL_UNSIGNED_BYTE, 0);
-
-                        // Fill the other PBO with the new frame (orphan + map)
-                        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, g_gl_pbos[fill_pbo]);
-                        glBufferData(GL_PIXEL_UNPACK_BUFFER, g_gl_pbo_size, NULL, GL_STREAM_DRAW);
-                        void *ptr = glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0, g_gl_pbo_size,
-                                                     GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT);
-                        if (ptr) {
-                            memcpy(ptr, render_local, g_gl_pbo_size);
-                            glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
-                        }
-                        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-
-                        g_gl_pbo_index = fill_pbo;
-                    } else if (g_gl_pbos[0] && g_gl_pbo_size == render_w * render_h) {
-                        // Priming phase: fill both PBOs with direct uploads first
-                        int fill_pbo = g_gl_pbo_index;
-                        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, g_gl_pbos[fill_pbo]);
-                        glBufferData(GL_PIXEL_UNPACK_BUFFER, g_gl_pbo_size, NULL, GL_STREAM_DRAW);
-                        void *ptr = glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0, g_gl_pbo_size,
-                                                     GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT);
-                        if (ptr) {
-                            memcpy(ptr, render_local, g_gl_pbo_size);
-                            glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
-                        }
-                        // Upload directly from mapped PBO this frame too
-                        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
-                                        (GLsizei)render_w, (GLsizei)render_h,
-                                        GL_RED, GL_UNSIGNED_BYTE, 0);
-                        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-
-                        g_gl_pbo_index = 1 - fill_pbo;
-                        if (fill_pbo == 1) g_gl_pbo_primed = 1;
-                    } else {
-                        // Fallback: direct upload (PBOs not available or size mismatch)
-                        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
-                                        (GLsizei)render_w, (GLsizei)render_h,
-                                        GL_RED, GL_UNSIGNED_BYTE, render_local);
-                    }
-
-                    glDrawArrays(GL_TRIANGLES, 0, 6);
-                    clock_gettime(CLOCK_MONOTONIC, &t4b);
-
-                    if (!eglSwapBuffers(g_egl_display, g_egl_surface)) {
-                        LOGE("eglSwapBuffers failed: 0x%x", eglGetError());
-                        gl_teardown();
-                        gl_disabled = 1;
-                    } else {
-                        did_present = 1;
-                    }
-                    clock_gettime(CLOCK_MONOTONIC, &t5);
-                }
-            }
-
-            if (!did_present) {
-                ANativeWindow_Buffer nbuf;
-                if (ANativeWindow_lock(g_window, &nbuf, NULL) == 0) {
-                    clock_gettime(CLOCK_MONOTONIC, &t4a);
-                    uint8_t *dst = (uint8_t *)nbuf.bits;
-                    int dst_stride = nbuf.stride * 4;
-                    int fw = (int)render_w;
-                    int fh = (int)render_h;
-                    for (int y = 0; y < fh && y < nbuf.height; y++) {
-                        uint8_t *row = dst + y * dst_stride;
-                        const uint8_t *row_src = render_local + y * fw;
-                        int x = 0;
-                        for (; x + 16 <= fw && x + 16 <= nbuf.width; x += 16) {
-                            uint8x16_t g = vld1q_u8(row_src + x);
-                            uint8x16_t ff = vdupq_n_u8(0xFF);
-                            uint8x16x4_t rgbx;
-                            rgbx.val[0] = g;
-                            rgbx.val[1] = g;
-                            rgbx.val[2] = g;
-                            rgbx.val[3] = ff;
-                            vst4q_u8(row + x * 4, rgbx);
-                        }
-                        for (; x < fw && x < nbuf.width; x++) {
-                            uint8_t v = row_src[x];
-                            row[x * 4 + 0] = v;
-                            row[x * 4 + 1] = v;
-                            row[x * 4 + 2] = v;
-                            row[x * 4 + 3] = 0xFF;
-                        }
-                    }
-                    clock_gettime(CLOCK_MONOTONIC, &t4b);
-                    ANativeWindow_unlockAndPost(g_window);
-                    clock_gettime(CLOCK_MONOTONIC, &t5);
-                    did_present = 1;
-                }
-            }
-
-            if (did_present) {
-                pthread_mutex_lock(&g_frame_mutex);
-                g_render_neon_sum += ms_diff(t4a, t4b);
-                g_render_vsync_sum += ms_diff(t4b, t5);
-                g_render_stat_frames += 1;
-                pthread_mutex_unlock(&g_frame_mutex);
-            }
-        }
+    pthread_mutex_lock(&g_codec_mutex);
+    AMediaCodec *codec = g_codec;
+    if (!codec) {
+        pthread_mutex_unlock(&g_codec_mutex);
+        return 0;
     }
 
-    gl_teardown();
-    free(render_local);
-    return NULL;
+    // Get input buffer with 2ms timeout
+    ssize_t input_idx = AMediaCodec_dequeueInputBuffer(codec, 2000);
+    if (input_idx < 0) {
+        pthread_mutex_unlock(&g_codec_mutex);
+        // Timeout is OK — just skip this frame
+        send_ack(sock, seq);
+        return 1;
+    }
+
+    size_t buf_size = 0;
+    uint8_t *input_buf = AMediaCodec_getInputBuffer(codec, (size_t)input_idx, &buf_size);
+    if (!input_buf || len > buf_size) {
+        AMediaCodec_queueInputBuffer(codec, (size_t)input_idx, 0, 0, 0, 0);
+        pthread_mutex_unlock(&g_codec_mutex);
+        LOGE("Input buffer too small: need %zu, have %zu", len, buf_size);
+        send_ack(sock, seq);
+        return 1;
+    }
+
+    memcpy(input_buf, data, len);
+    uint32_t flags = is_idr ? AMEDIACODEC_BUFFER_FLAG_KEY_FRAME : 0;
+    AMediaCodec_queueInputBuffer(codec, (size_t)input_idx, 0, len, 0, flags);
+
+    // Drain all available output buffers and render to Surface
+    AMediaCodecBufferInfo info;
+    ssize_t output_idx;
+    while ((output_idx = AMediaCodec_dequeueOutputBuffer(codec, &info, 0)) >= 0) {
+        // render=true pushes directly to the configured Surface/ANativeWindow
+        AMediaCodec_releaseOutputBuffer(codec, (size_t)output_idx, info.size > 0);
+    }
+    // AMEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED and AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED
+    // are negative values — silently ignored here, they don't require action.
+
+    pthread_mutex_unlock(&g_codec_mutex);
+
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    *out_decode_ms = ms_diff(t0, t1);
+
+    send_ack(sock, seq);
+    return 1;
 }
 
 static void *decode_thread(void *arg) {
@@ -798,18 +229,18 @@ static void *decode_thread(void *arg) {
     set_thread_realtime("decode_thread");
     LOGI("Decode thread started, connecting to %s:%d", g_host, g_port);
 
-    g_current_frame = (uint8_t *)calloc(g_pixel_count, 1);
-    g_compressed_buf = (uint8_t *)malloc(g_max_compressed);
-    uint8_t *decompress_buf = (uint8_t *)malloc(g_pixel_count);
-    g_render_frames[0] = (uint8_t *)malloc(g_pixel_count);
-    g_render_frames[1] = (uint8_t *)malloc(g_pixel_count);
-
-    if (!g_current_frame || !g_compressed_buf || !decompress_buf || !g_render_frames[0] || !g_render_frames[1]) {
-        LOGE("Failed to allocate buffers");
-        goto cleanup;
+    // Ensure decoder is created before we start receiving frames
+    if (g_window && !g_codec) {
+        create_decoder(g_window, g_frame_w, g_frame_h);
     }
-    memset(g_render_frames[0], 0xFF, g_pixel_count);
-    memset(g_render_frames[1], 0xFF, g_pixel_count);
+
+    // Initial receive buffer
+    g_nal_buf_capacity = 2 * 1024 * 1024;  // 2MB — plenty for any single access unit
+    g_nal_buf = (uint8_t *)malloc(g_nal_buf_capacity);
+    if (!g_nal_buf) {
+        LOGE("Failed to allocate NAL buffer");
+        return NULL;
+    }
 
     while (g_running) {
         int sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -822,7 +253,7 @@ static void *decode_thread(void *arg) {
         int flag = 1;
         setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
         setsockopt(sock, IPPROTO_TCP, TCP_QUICKACK, &flag, sizeof(flag));
-        int rcvbuf = 512 * 1024;
+        int rcvbuf = 2 * 1024 * 1024;  // 2MB — H.264 frames are larger than LZ4 deltas
         setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
 
         struct sockaddr_in addr;
@@ -845,15 +276,14 @@ static void *decode_thread(void *arg) {
         int frame_count = 0;
         int stat_frames = 0;
         int dropped_frames = 0;
-        int skipped_deltas = 0;
         uint32_t last_seq = 0;
         int has_last_seq = 0;
-        double recv_sum = 0, decomp_sum = 0, delta_sum = 0;
+        double recv_sum = 0, decode_sum = 0;
         struct timespec stat_start;
         clock_gettime(CLOCK_MONOTONIC, &stat_start);
 
         while (g_running) {
-            struct timespec t0, t1, t2, t3;
+            struct timespec t0, t1;
             clock_gettime(CLOCK_MONOTONIC, &t0);
 
             uint8_t magic[2];
@@ -866,6 +296,7 @@ static void *decode_thread(void *arg) {
                 break;
             }
 
+            // Command packet [DA 7F cmd ...]
             if (magic[1] == MAGIC_CMD_1) {
                 uint8_t cmd;
                 if (read_exact(sock, &cmd, 1) < 0) break;
@@ -876,30 +307,26 @@ static void *decode_thread(void *arg) {
                     uint32_t new_w = res_data[0] | (res_data[1] << 8);
                     uint32_t new_h = res_data[2] | (res_data[3] << 8);
                     if (new_w > 0 && new_h > 0 && new_w <= 4096 && new_h <= 4096) {
-                        if (reallocate_buffers(new_w, new_h, &decompress_buf)) {
-                            if (g_window) {
-                                ANativeWindow_setBuffersGeometry(g_window, new_w, new_h,
-                                    AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM);
-                            }
-                            LOGI("Resolution → %ux%u (%u pixels)", new_w, new_h, g_pixel_count);
+                        LOGI("Resolution → %ux%u, recreating decoder", new_w, new_h);
+                        if (g_window) {
+                            ANativeWindow_setBuffersGeometry(g_window, (int32_t)new_w, (int32_t)new_h, 0);
+                            create_decoder(g_window, new_w, new_h);
+                        }
 
-                            if (g_jvm && g_activity) {
-                                JNIEnv *env2;
-                                int attached2 = 0;
-                                if ((*g_jvm)->GetEnv(g_jvm, (void **)&env2, JNI_VERSION_1_6) != JNI_OK) {
-                                    (*g_jvm)->AttachCurrentThread(g_jvm, &env2, NULL);
-                                    attached2 = 1;
-                                }
-                                jclass cls2 = (*env2)->GetObjectClass(env2, g_activity);
-                                jmethodID mid2 = (*env2)->GetMethodID(env2, cls2, "setOrientation", "(Z)V");
-                                if (mid2) {
-                                    (*env2)->CallVoidMethod(env2, g_activity, mid2,
-                                        (jboolean)(new_h > new_w ? 1 : 0));
-                                }
-                                if (attached2) (*g_jvm)->DetachCurrentThread(g_jvm);
+                        if (g_jvm && g_activity) {
+                            JNIEnv *env2;
+                            int attached2 = 0;
+                            if ((*g_jvm)->GetEnv(g_jvm, (void **)&env2, JNI_VERSION_1_6) != JNI_OK) {
+                                (*g_jvm)->AttachCurrentThread(g_jvm, &env2, NULL);
+                                attached2 = 1;
                             }
-                        } else {
-                            LOGE("Resolution change allocation failed");
+                            jclass cls2 = (*env2)->GetObjectClass(env2, g_activity);
+                            jmethodID mid2 = (*env2)->GetMethodID(env2, cls2, "setOrientation", "(Z)V");
+                            if (mid2) {
+                                (*env2)->CallVoidMethod(env2, g_activity, mid2,
+                                    (jboolean)(new_h > new_w ? 1 : 0));
+                            }
+                            if (attached2) (*g_jvm)->DetachCurrentThread(g_jvm);
                         }
                     }
                     continue;
@@ -932,15 +359,18 @@ static void *decode_thread(void *arg) {
                 break;
             }
 
+            // Frame header: [flags:1] [seq:4 LE] [len:4 LE]
             uint8_t frame_hdr[9];
             if (read_exact(sock, frame_hdr, 9) < 0) {
                 LOGE("Connection lost reading frame header");
                 break;
             }
 
-            uint8_t flags      = frame_hdr[0];
-            uint32_t seq        = frame_hdr[1] | (frame_hdr[2] << 8) | (frame_hdr[3] << 16) | (frame_hdr[4] << 24);
-            uint32_t payload_len = frame_hdr[5] | (frame_hdr[6] << 8) | (frame_hdr[7] << 16) | (frame_hdr[8] << 24);
+            uint8_t flags       = frame_hdr[0];
+            uint32_t seq        = frame_hdr[1] | ((uint32_t)frame_hdr[2] << 8) |
+                                  ((uint32_t)frame_hdr[3] << 16) | ((uint32_t)frame_hdr[4] << 24);
+            uint32_t payload_len = frame_hdr[5] | ((uint32_t)frame_hdr[6] << 8) |
+                                   ((uint32_t)frame_hdr[7] << 16) | ((uint32_t)frame_hdr[8] << 24);
 
             if (has_last_seq && seq != last_seq + 1) {
                 int gap = (int)(seq - last_seq - 1);
@@ -949,54 +379,37 @@ static void *decode_thread(void *arg) {
             last_seq = seq;
             has_last_seq = 1;
 
-            if (payload_len > g_max_compressed) {
-                LOGE("Payload too large: %u", payload_len);
-                break;
+            // Grow receive buffer if needed
+            if (payload_len > g_nal_buf_capacity) {
+                uint8_t *new_buf = (uint8_t *)realloc(g_nal_buf, payload_len);
+                if (!new_buf) {
+                    LOGE("Failed to grow NAL buffer to %u bytes", payload_len);
+                    break;
+                }
+                g_nal_buf = new_buf;
+                g_nal_buf_capacity = payload_len;
             }
 
-            if (read_exact(sock, g_compressed_buf, payload_len) < 0) {
+            if (read_exact(sock, g_nal_buf, (int)payload_len) < 0) {
                 LOGE("Failed to read payload");
                 break;
             }
             clock_gettime(CLOCK_MONOTONIC, &t1);
 
-            int decompressed_size = LZ4_decompress_safe(
-                (const char *)g_compressed_buf,
-                (char *)decompress_buf,
-                payload_len,
-                g_pixel_count
-            );
-            clock_gettime(CLOCK_MONOTONIC, &t2);
-
-            if (decompressed_size != (int)g_pixel_count) {
-                LOGE("LZ4 decompress failed: got %d, expected %u", decompressed_size, g_pixel_count);
-                if (flags & FLAG_KEYFRAME) break;
-                continue;
+            double decode_ms = 0.0;
+            if (!feed_nal(g_nal_buf, payload_len, (flags & FLAG_KEYFRAME) != 0, seq, sock, &decode_ms)) {
+                LOGE("feed_nal fatal error, reconnecting");
+                break;
             }
 
-            if (flags & FLAG_KEYFRAME) {
-                memcpy(g_current_frame, decompress_buf, g_pixel_count);
-            } else if (payload_len < 256) {
-                skipped_deltas += 1;
-            } else {
-                apply_delta_neon(g_current_frame, decompress_buf, g_pixel_count);
-            }
-            clock_gettime(CLOCK_MONOTONIC, &t3);
-
-            send_ack(sock, seq);
-            publish_frame(g_current_frame, seq);
-
-            // Notify connected only after first frame is rendered
-            // (TCP connect alone doesn't mean the server is streaming)
             if (frame_count == 0) {
                 notify_connection_state(1);
             }
 
             recv_sum += ms_diff(t0, t1);
-            decomp_sum += ms_diff(t1, t2);
-            delta_sum += ms_diff(t2, t3);
-            frame_count += 1;
-            stat_frames += 1;
+            decode_sum += decode_ms;
+            frame_count++;
+            stat_frames++;
 
             struct timespec now;
             clock_gettime(CLOCK_MONOTONIC, &now);
@@ -1004,35 +417,18 @@ static void *decode_thread(void *arg) {
                              (now.tv_nsec - stat_start.tv_nsec) / 1e9;
             if (elapsed >= 5.0 && stat_frames > 0) {
                 double fps = stat_frames / elapsed;
-                pthread_mutex_lock(&g_frame_mutex);
-                double neon_avg = g_render_stat_frames > 0 ? (g_render_neon_sum / g_render_stat_frames) : 0.0;
-                double vsync_avg = g_render_stat_frames > 0 ? (g_render_vsync_sum / g_render_stat_frames) : 0.0;
-                int overwritten = g_overwritten_frames;
-                g_render_neon_sum = 0.0;
-                g_render_vsync_sum = 0.0;
-                g_render_stat_frames = 0;
-                g_overwritten_frames = 0;
-                pthread_mutex_unlock(&g_frame_mutex);
-
-                LOGI("FPS: %.1f | recv: %.1fms | lz4: %.1fms | delta: %.1fms | neon: %.1fms | vsync: %.1fms | %uKB %s | drops: %d | skip: %d | overwritten: %d | total: %d",
+                LOGI("FPS: %.1f | recv: %.1fms | decode: %.1fms | %uKB %s | drops: %d | total: %d",
                      fps,
                      recv_sum / stat_frames,
-                     decomp_sum / stat_frames,
-                     delta_sum / stat_frames,
-                     neon_avg,
-                     vsync_avg,
+                     decode_sum / stat_frames,
                      payload_len / 1024,
-                     (flags & FLAG_KEYFRAME) ? "KF" : "delta",
+                     (flags & FLAG_KEYFRAME) ? "IDR" : "P",
                      dropped_frames,
-                     skipped_deltas,
-                     overwritten,
                      frame_count);
-
                 stat_frames = 0;
                 recv_sum = 0;
-                decomp_sum = 0;
-                delta_sum = 0;
-                skipped_deltas = 0;
+                decode_sum = 0;
+                dropped_frames = 0;
                 stat_start = now;
             }
         }
@@ -1042,30 +438,13 @@ static void *decode_thread(void *arg) {
             g_sock = -1;
         }
         LOGI("Disconnected, reconnecting in 1s...");
-
-        if (g_current_frame) {
-            memset(g_current_frame, 0xFF, g_pixel_count);
-            publish_frame(g_current_frame, g_ready_seq + 1);
-        }
-
         notify_connection_state(0);
         sleep(1);
     }
 
-cleanup:
-    if (g_sock >= 0) {
-        close(g_sock);
-        g_sock = -1;
-    }
-    free(g_current_frame); g_current_frame = NULL;
-    free(g_compressed_buf); g_compressed_buf = NULL;
-    free(decompress_buf);
-    free(g_render_frames[0]); g_render_frames[0] = NULL;
-    free(g_render_frames[1]); g_render_frames[1] = NULL;
-    pthread_mutex_lock(&g_frame_mutex);
-    g_has_ready_frame = 0;
-    pthread_mutex_unlock(&g_frame_mutex);
-    pthread_cond_signal(&g_frame_cond);
+    free(g_nal_buf);
+    g_nal_buf = NULL;
+    g_nal_buf_capacity = 0;
     LOGI("Decode thread exited");
     return NULL;
 }
@@ -1081,8 +460,6 @@ Java_com_daylight_mirror_MirrorActivity_nativeStart(
     g_activity = (*env)->NewGlobalRef(env, thiz);
 
     g_window = ANativeWindow_fromSurface(env, surface);
-    ANativeWindow_setBuffersGeometry(g_window, g_frame_w, g_frame_h,
-        AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM);
 
     const char *host_str = (*env)->GetStringUTFChars(env, host, NULL);
     strncpy(g_host, host_str, sizeof(g_host) - 1);
@@ -1090,7 +467,10 @@ Java_com_daylight_mirror_MirrorActivity_nativeStart(
     g_port = port;
 
     g_running = 1;
-    pthread_create(&g_render_thread, NULL, render_thread, NULL);
+
+    // Create decoder now — decode thread will also check on startup
+    create_decoder(g_window, g_frame_w, g_frame_h);
+
     pthread_create(&g_decode_thread, NULL, decode_thread, NULL);
 }
 
@@ -1100,14 +480,13 @@ Java_com_daylight_mirror_MirrorActivity_nativeStop(
     JNIEnv *env, jobject thiz)
 {
     g_running = 0;
-    pthread_cond_broadcast(&g_frame_cond);
     if (g_sock >= 0) {
         shutdown(g_sock, SHUT_RDWR);
         close(g_sock);
         g_sock = -1;
     }
     pthread_join(g_decode_thread, NULL);
-    pthread_join(g_render_thread, NULL);
+    destroy_decoder();
     if (g_window) {
         ANativeWindow_release(g_window);
         g_window = NULL;

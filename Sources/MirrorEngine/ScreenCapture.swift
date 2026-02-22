@@ -1,17 +1,17 @@
-// ScreenCapture.swift — CPU-only screen capture with vImage SIMD + LZ4 delta.
+// ScreenCapture.swift — Mac screen capture with VideoToolbox H.264 hardware encode.
 //
 // Captures the virtual display via CGDisplayStream (loaded at runtime via dlsym
-// to bypass macOS 15 SDK deprecation), converts BGRA to greyscale using vImage
-// SIMD, optionally sharpens with Laplacian convolution, applies contrast LUT,
-// then LZ4 compresses (keyframe or XOR delta). Zero GPU usage.
+// to bypass macOS 15 SDK deprecation), wraps each IOSurface as a CVPixelBuffer,
+// and feeds it into a VTCompressionSession for low-latency H.264 encoding.
+// The encoded NAL units (Annex B) are broadcast over TCP to the Android receiver.
 
 import Foundation
 import Darwin
 import IOSurface
 import CoreImage
 import QuartzCore
-import Accelerate
-import CLZ4
+import VideoToolbox
+import CoreMedia
 
 // MARK: - Screen Capture Errors
 
@@ -31,8 +31,6 @@ enum ScreenCaptureError: LocalizedError {
 
 // MARK: - CGDisplayStream dlsym types
 
-// CGDisplayStream C functions are deprecated in macOS 15 SDK but still exist at
-// runtime. We load them via dlsym to avoid compile-time deprecation errors.
 private typealias CGDisplayStreamCreateFn = @convention(c) (
     UInt32, Int, Int, Int32, CFDictionary?, DispatchQueue,
     @escaping @convention(block) (Int32, UInt64, IOSurfaceRef?, OpaquePointer?) -> Void
@@ -44,8 +42,6 @@ func adaptiveBackpressureThreshold(rttMs: Double) -> Int {
     max(2, min(6, Int(120.0 / max(rttMs, 1.0))))
 }
 
-let TRIVIAL_DELTA_THRESHOLD = 512
-
 // MARK: - Screen Capture
 
 class ScreenCapture: NSObject {
@@ -55,21 +51,16 @@ class ScreenCapture: NSObject {
     let targetDisplayID: CGDirectDisplayID
 
     // CGDisplayStream runtime handles
-    private var cgHandle: UnsafeMutableRawPointer?       // dlopen handle
-    private var displayStream: OpaquePointer?            // retained stream ref
+    private var cgHandle: UnsafeMutableRawPointer?
+    private var displayStream: OpaquePointer?
 
-    var currentGray: UnsafeMutablePointer<UInt8>?
-    var previousGray: UnsafeMutablePointer<UInt8>?
-    var deltaBuffer: UnsafeMutablePointer<UInt8>?
-    var compressedBuffer: UnsafeMutablePointer<CChar>?
-    var sharpenTemp: UnsafeMutablePointer<UInt8>?  // Pre-sharpen greyscale buffer
-    var contrastLUT: [UInt8] = Array(0...255)       // Precomputed contrast LUT
-    var lastContrastAmount: Double = 1.0           // Tracks when to rebuild LUT
-    var sharpenAmount: Double = 1.0                // 0=none, 1=mild, 2=strong, 3=max
-    var contrastAmount: Double = 1.0               // 1.0=off, >1=enhanced
+    // VideoToolbox encoder
+    private var vtSession: VTCompressionSession?
+    private var encoderFormatDesc: CMFormatDescription?
+
+    // Frame dimensions
     var frameWidth: Int = 0
     var frameHeight: Int = 0
-    var pixelCount: Int = 0
 
     var frameCount: Int = 0
     var frameSequence: UInt32 = 0
@@ -81,12 +72,11 @@ class ScreenCapture: NSObject {
     var statFrames: Int = 0
     var lastCompressedSize: Int = 0
 
-    // Jitter tracking: measures interval variance between callbacks
-    var lastCallbackTime: Double = 0
     var jitterSamples: [Double] = []
+    var lastCallbackTime: Double = 0
     let jitterWindowSize = 150
 
-    /// Callback: (fps, bandwidthMB, frameSizeKB, totalFrames, greyMs, compressMs, jitterMs)
+    /// Callback: (fps, bandwidthMB, frameSizeKB, totalFrames, greyMs, compressMs, jitterMs, skipped)
     var onStats: ((Double, Double, Int, Int, Double, Double, Double, Int) -> Void)?
 
     let expectedWidth: Int
@@ -103,26 +93,17 @@ class ScreenCapture: NSObject {
     }
 
     func start() async throws {
-        // Pre-check screen recording permission
         guard CGPreflightScreenCaptureAccess() else {
             throw ScreenCaptureError.permissionDenied
         }
 
         frameWidth = expectedWidth
         frameHeight = expectedHeight
-        pixelCount = frameWidth * frameHeight
 
-        currentGray = .allocate(capacity: pixelCount)
-        previousGray = .allocate(capacity: pixelCount)
-        deltaBuffer = .allocate(capacity: pixelCount)
-        sharpenTemp = .allocate(capacity: pixelCount)
-        let maxCompressed = LZ4_compressBound(Int32(pixelCount))
-        compressedBuffer = .allocate(capacity: Int(maxCompressed))
-        previousGray!.initialize(repeating: 0, count: pixelCount)
+        try setupEncoder()
 
         print("Capturing display: \(expectedWidth)x\(expectedHeight) pixels (ID: \(targetDisplayID))")
 
-        // Load CGDisplayStream functions via dlsym
         guard let cg = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_LAZY) else {
             throw ScreenCaptureError.contentEnumerationFailed(
                 NSError(domain: "ScreenCapture", code: -1,
@@ -131,31 +112,24 @@ class ScreenCapture: NSObject {
         cgHandle = cg
 
         guard let createSym = dlsym(cg, "CGDisplayStreamCreateWithDispatchQueue"),
-              let startSym = dlsym(cg, "CGDisplayStreamStart"),
-              let stopSym = dlsym(cg, "CGDisplayStreamStop") else {
+              let startSym  = dlsym(cg, "CGDisplayStreamStart"),
+              let stopSym   = dlsym(cg, "CGDisplayStreamStop") else {
             throw ScreenCaptureError.contentEnumerationFailed(
                 NSError(domain: "ScreenCapture", code: -2,
                         userInfo: [NSLocalizedDescriptionKey: "Failed to resolve CGDisplayStream symbols"]))
         }
-        // Suppress unused variable warning — stopSym is resolved here to fail fast,
-        // but the actual stop function is loaded again in stop() for lifetime safety.
         _ = stopSym
 
         let createFn = unsafeBitCast(createSym, to: CGDisplayStreamCreateFn.self)
-        let startFn = unsafeBitCast(startSym, to: CGDisplayStreamStartFn.self)
+        let startFn  = unsafeBitCast(startSym,  to: CGDisplayStreamStartFn.self)
 
-        // CGDisplayStream configuration
-        // No minimum frame time — let the display stream deliver frames as fast
-        // as the compositor produces them. The adaptive backpressure in handleFrame
-        // drops frames when Android can't keep up anyway.
         let properties: NSDictionary = [
             "kCGDisplayStreamShowCursor": kCFBooleanTrue as Any
         ]
 
         let captureQueue = DispatchQueue(label: "capture", qos: .userInteractive)
-        let pixelFormat: Int32 = 1111970369  // kCVPixelFormatType_32BGRA (0x42475241)
+        let pixelFormat: Int32 = 1111970369  // kCVPixelFormatType_32BGRA
 
-        // Create the display stream
         guard let stream = createFn(
             targetDisplayID,
             frameWidth,
@@ -172,12 +146,10 @@ class ScreenCapture: NSObject {
                         userInfo: [NSLocalizedDescriptionKey: "CGDisplayStreamCreateWithDispatchQueue returned nil"]))
         }
 
-        // Retain the stream reference — without this it gets deallocated
         displayStream = stream
         let cfStream = Unmanaged<CFTypeRef>.fromOpaque(UnsafeRawPointer(stream))
         _ = cfStream.retain()
 
-        // Start capture
         let result = startFn(stream)
         guard result == 0 else {
             throw ScreenCaptureError.contentEnumerationFailed(
@@ -186,17 +158,15 @@ class ScreenCapture: NSObject {
         }
 
         lastStatTime = Date()
-        print("Capture started at \(TARGET_FPS)fps -- CGDisplayStream + vImage + LZ4 delta (zero GPU)")
+        print("Capture started at \(TARGET_FPS)fps -- CGDisplayStream + VideoToolbox H.264")
     }
 
     func stop() async {
         if let stream = displayStream {
-            // Load stop function
             if let cg = cgHandle, let stopSym = dlsym(cg, "CGDisplayStreamStop") {
                 let stopFn = unsafeBitCast(stopSym, to: CGDisplayStreamStopFn.self)
                 _ = stopFn(stream)
             }
-            // Release the retained CFTypeRef
             let cfStream = Unmanaged<CFTypeRef>.fromOpaque(UnsafeRawPointer(stream))
             cfStream.release()
             displayStream = nil
@@ -205,18 +175,77 @@ class ScreenCapture: NSObject {
             dlclose(cg)
             cgHandle = nil
         }
-        currentGray?.deallocate(); currentGray = nil
-        previousGray?.deallocate(); previousGray = nil
-        deltaBuffer?.deallocate(); deltaBuffer = nil
-        sharpenTemp?.deallocate(); sharpenTemp = nil
-        compressedBuffer?.deallocate(); compressedBuffer = nil
+        if let session = vtSession {
+            VTCompressionSessionInvalidate(session)
+            vtSession = nil
+        }
+        encoderFormatDesc = nil
+    }
+
+    // MARK: - Encoder setup
+
+    private func setupEncoder() throws {
+        // VideoToolbox requires NV12 source — we'll wrap the BGRA IOSurface and let
+        // the hardware encoder handle BGRA→NV12 internally (confirmed zero-copy path).
+        // Source pixel format declared as BGRA so VT allocates the right pool.
+        let sourcePixelFormat = kCVPixelFormatType_32BGRA
+
+        // kVTVideoEncoderSpecification_EnableLowLatencyRateControl must be in the
+        // encoderSpec dict at creation time, NOT set as a property afterwards.
+        let encoderSpec: NSDictionary = [
+            kVTVideoEncoderSpecification_EnableLowLatencyRateControl: true
+        ]
+
+        var session: VTCompressionSession?
+        let status = VTCompressionSessionCreate(
+            allocator: nil,
+            width: Int32(frameWidth),
+            height: Int32(frameHeight),
+            codecType: kCMVideoCodecType_H264,
+            encoderSpecification: encoderSpec as CFDictionary,
+            imageBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey: sourcePixelFormat,
+                kCVPixelBufferWidthKey: frameWidth,
+                kCVPixelBufferHeightKey: frameHeight,
+            ] as CFDictionary,
+            compressedDataAllocator: nil,
+            outputCallback: vtOutputCallback,
+            refcon: Unmanaged.passUnretained(self).toOpaque(),
+            compressionSessionOut: &session
+        )
+        guard status == noErr, let session = session else {
+            throw ScreenCaptureError.contentEnumerationFailed(
+                NSError(domain: "ScreenCapture", code: Int(status),
+                        userInfo: [NSLocalizedDescriptionKey: "VTCompressionSessionCreate failed: \(status)"]))
+        }
+
+        // Real-time low-latency encoding
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+        // No B-frames — zero reorder latency
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
+        // Baseline profile for maximum Android MediaCodec compatibility
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel,
+                             value: kVTProfileLevel_H264_Baseline_AutoLevel)
+        // High quality near-lossless — UI mirroring needs to be readable
+        // 80 Mbps for 1600×1200 greyscale @ 120fps
+        let bitrate: Int = 80_000_000
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate,
+                             value: bitrate as CFNumber)
+        // Force IDR every KEYFRAME_INTERVAL frames as a corruption-recovery fallback
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
+                             value: KEYFRAME_INTERVAL as CFNumber)
+        // Expected frame rate — helps rate control
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate,
+                             value: TARGET_FPS as CFNumber)
+
+        VTCompressionSessionPrepareToEncodeFrames(session)
+        vtSession = session
+        print("VideoToolbox H.264 encoder ready: \(frameWidth)x\(frameHeight) @ \(bitrate/1_000_000)Mbps")
     }
 
     // MARK: - Frame callback
 
     private func handleFrame(status: Int32, surface: IOSurfaceRef?) {
-        // Status codes:
-        // 0 = FrameComplete, 1 = FrameIdle, 2 = FrameBlank, 3 = Stopped
         guard status == 0, let surface = surface else { return }
 
         let t0 = CACurrentMediaTime()
@@ -232,92 +261,16 @@ class ScreenCapture: NSObject {
         }
         lastCallbackTime = t0
 
-        IOSurfaceLock(surface, .readOnly, nil)
-        let baseAddress = IOSurfaceGetBaseAddress(surface)
-        let rowBytes = IOSurfaceGetBytesPerRow(surface)
-
-        var srcBuffer = vImage_Buffer(
-            data: baseAddress,
-            height: vImagePixelCount(frameHeight),
-            width: vImagePixelCount(frameWidth),
-            rowBytes: rowBytes
-        )
-
-        var matrix: [Int16] = [29, 150, 77, 0]
-        let greyDivisor: Int32 = 256
-        var preBias: [Int16] = [0, 0, 0, 0]
-
-        let sharpAmt = sharpenAmount
-        let contrastAmt = contrastAmount
-
-        if sharpAmt > 0.01 {
-            // Greyscale → sharpenTemp, then Laplacian convolve → currentGray
-            // Kernel: [0, -a, 0; -a, 1+4a, -a; 0, -a, 0] with divisor to allow fractional a.
-            // Use divisor=4 for 0.25 step granularity.
-            var preSharpenBuffer = vImage_Buffer(
-                data: sharpenTemp!, height: vImagePixelCount(frameHeight),
-                width: vImagePixelCount(frameWidth), rowBytes: frameWidth
-            )
-            vImageMatrixMultiply_ARGB8888ToPlanar8(
-                &srcBuffer, &preSharpenBuffer, &matrix, greyDivisor, &preBias, 0,
-                vImage_Flags(kvImageNoFlags)
-            )
-            var dstBuffer = vImage_Buffer(
-                data: currentGray!, height: vImagePixelCount(frameHeight),
-                width: vImagePixelCount(frameWidth), rowBytes: frameWidth
-            )
-            let a = Int16(sharpAmt * 4)  // scale by divisor=4
-            let center = 4 + 4 * a       // (1 + 4*amount) * divisor = 4 + 4*a
-            var kernel: [Int16] = [0, -a, 0, -a, center, -a, 0, -a, 0]
-            vImageConvolve_Planar8(
-                &preSharpenBuffer, &dstBuffer, nil, 0, 0,
-                &kernel, 3, 3, 4, 0, vImage_Flags(kvImageEdgeExtend)
-            )
-        } else {
-            // No sharpening — greyscale directly into currentGray
-            var dstBuffer = vImage_Buffer(
-                data: currentGray!, height: vImagePixelCount(frameHeight),
-                width: vImagePixelCount(frameWidth), rowBytes: frameWidth
-            )
-            vImageMatrixMultiply_ARGB8888ToPlanar8(
-                &srcBuffer, &dstBuffer, &matrix, greyDivisor, &preBias, 0,
-                vImage_Flags(kvImageNoFlags)
-            )
-        }
-
-        // Contrast enhancement (independent of sharpening).
-        // LUT rebuilt lazily on capture thread to avoid data race with main thread.
-        if contrastAmt > 1.01 {
-            if contrastAmt != lastContrastAmount {
-                contrastLUT = (0..<256).map { i in
-                    UInt8(max(0, min(255, Int(128.0 + contrastAmt * (Double(i) - 128.0)))))
-                }
-                lastContrastAmount = contrastAmt
-            }
-            var lut = contrastLUT
-            var src = vImage_Buffer(data: currentGray!, height: vImagePixelCount(frameHeight),
-                                    width: vImagePixelCount(frameWidth), rowBytes: frameWidth)
-            var dst = vImage_Buffer(data: currentGray!, height: vImagePixelCount(frameHeight),
-                                    width: vImagePixelCount(frameWidth), rowBytes: frameWidth)
-            vImageTableLookUp_Planar8(&src, &dst, &lut, vImage_Flags(kvImageNoFlags))
-        }
-
-        let t1 = CACurrentMediaTime()
-
-        // Drop frames when Android can't keep up — send only the latest
+        // Backpressure: drop frames when Android can't keep up
         let inflight = tcpServer.inflightFrames
         let isScheduledKeyframe = (frameCount % KEYFRAME_INTERVAL == 0)
-
         let rtt = tcpServer.latencyStats?.rttAvgMs ?? 15.0
         let adaptiveThreshold = adaptiveBackpressureThreshold(rttMs: rtt)
+
         if inflight > adaptiveThreshold && !isScheduledKeyframe {
             skippedFrames += 1
             forceNextKeyframe = true
-            // Still swap buffers so currentGray stays fresh for next delta base
-            let temp = previousGray
-            previousGray = currentGray
-            currentGray = temp
-
+            IOSurfaceLock(surface, .readOnly, nil)
             IOSurfaceUnlock(surface, .readOnly, nil)
             frameCount += 1
             return
@@ -325,42 +278,48 @@ class ScreenCapture: NSObject {
 
         let isKeyframe = isScheduledKeyframe || forceNextKeyframe
         if forceNextKeyframe { forceNextKeyframe = false }
-        let seq = frameSequence
-        frameSequence &+= 1
 
-        if isKeyframe {
-            let compressedSize = LZ4_compress_fast(
-                currentGray!, compressedBuffer!, Int32(pixelCount),
-                LZ4_compressBound(Int32(pixelCount)), 8
-            )
-            let payload = Data(bytes: compressedBuffer!, count: Int(compressedSize))
-            tcpServer.broadcast(payload: payload, isKeyframe: true, sequenceNumber: seq)
-            lastCompressedSize = Int(compressedSize)
-        } else {
-            mirror_xor(deltaBuffer!, currentGray!, previousGray!, pixelCount)
-            let compressedSize = LZ4_compress_fast(
-                deltaBuffer!, compressedBuffer!, Int32(pixelCount),
-                LZ4_compressBound(Int32(pixelCount)), 8
-            )
-            // Skip trivial deltas — screen barely changed, Android already has the frame
-            if compressedSize < TRIVIAL_DELTA_THRESHOLD {
-                skippedFrames += 1
-                frameSequence &-= 1  // reclaim sequence number
-            } else {
-                let payload = Data(bytes: compressedBuffer!, count: Int(compressedSize))
-                tcpServer.broadcast(payload: payload, isKeyframe: false, sequenceNumber: seq)
-            }
-            lastCompressedSize = Int(compressedSize)
+        // Wrap IOSurface as CVPixelBuffer — zero copy, VT handles BGRA→NV12 internally
+        IOSurfaceLock(surface, .readOnly, nil)
+
+        let iosurfaceObj = unsafeBitCast(surface, to: IOSurface.self)
+        var pixelBufferUnmanaged: Unmanaged<CVPixelBuffer>?
+        CVPixelBufferCreateWithIOSurface(nil, iosurfaceObj, nil, &pixelBufferUnmanaged)
+        let pixelBuffer = pixelBufferUnmanaged?.takeRetainedValue()
+
+        let t1 = CACurrentMediaTime()
+
+        guard let pixelBuffer = pixelBuffer, let session = vtSession else {
+            IOSurfaceUnlock(surface, .readOnly, nil)
+            frameCount += 1
+            return
         }
 
-        let temp = previousGray
-        previousGray = currentGray
-        currentGray = temp
+        // Force IDR if requested
+        var frameProps: CFDictionary? = nil
+        if isKeyframe {
+            frameProps = [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary
+        }
+
+        let presentationTime = CMTimeMake(value: Int64(frameCount), timescale: Int32(TARGET_FPS))
+        // Use the non-closure overload — output is delivered via the C callback set at session creation
+        VTCompressionSessionEncodeFrame(
+            session,
+            imageBuffer: pixelBuffer,
+            presentationTimeStamp: presentationTime,
+            duration: .invalid,
+            frameProperties: frameProps,
+            sourceFrameRefcon: nil,
+            infoFlagsOut: nil
+        )
+
+        IOSurfaceUnlock(surface, .readOnly, nil)
 
         let t2 = CACurrentMediaTime()
 
+        // WebSocket JPEG preview (independent path)
         if wsServer.hasClients {
-            let ciImage = CIImage(ioSurface: unsafeBitCast(surface, to: IOSurface.self))
+            let ciImage = CIImage(ioSurface: iosurfaceObj)
             let grayImage = ciImage.applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 0.0])
             if let jpegData = ciContext.jpegRepresentation(
                 of: grayImage,
@@ -370,8 +329,6 @@ class ScreenCapture: NSObject {
                 wsServer.broadcast(jpegData)
             }
         }
-
-        IOSurfaceUnlock(surface, .readOnly, nil)
 
         frameCount += 1
         statFrames += 1
@@ -386,7 +343,7 @@ class ScreenCapture: NSObject {
             let bw = Double(lastCompressedSize) * fps / 1024 / 1024
             let avgJitter = jitterSamples.isEmpty ? 0.0 : jitterSamples.reduce(0, +) / Double(jitterSamples.count)
 
-            print(String(format: "FPS: %.1f | gray: %.1fms | lz4+delta: %.1fms | jitter: %.1fms | frame: %dKB | ~%.1fMB/s | total: %d | skipped: %d",
+            print(String(format: "FPS: %.1f | wrap: %.2fms | encode: %.1fms | jitter: %.1fms | frame: %dKB | ~%.1fMB/s | total: %d | skipped: %d",
                          fps, avgConvert, avgCompress, avgJitter, lastCompressedSize / 1024, bw, frameCount, skippedFrames))
             onStats?(fps, bw, lastCompressedSize / 1024, frameCount, avgConvert, avgCompress, avgJitter, skippedFrames)
 
@@ -396,4 +353,95 @@ class ScreenCapture: NSObject {
             lastStatTime = now
         }
     }
+
+    // MARK: - VTCompressionSession output callback
+
+    func handleEncoderOutput(status: OSStatus, flags: VTEncodeInfoFlags, sampleBuffer: CMSampleBuffer?) {
+        guard status == noErr, let sampleBuffer = sampleBuffer else { return }
+        guard !flags.contains(.frameDropped) else { return }
+
+        // Determine if this is an IDR (keyframe) — no dependency on other frames
+        let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false)
+        var isIDR = false
+        if let attachments = attachments as? [[CFString: Any]], let first = attachments.first {
+            // kCMSampleAttachmentKey_NotSync absent or false → sync (IDR) frame
+            let notSync = first[kCMSampleAttachmentKey_NotSync] as? Bool ?? false
+            isIDR = !notSync
+        }
+
+        // Build Annex B bitstream from AVCC sample buffer
+        var annexB = Data()
+
+        if isIDR {
+            // Prepend SPS + PPS NAL units before every IDR frame
+            if let fmtDesc = CMSampleBufferGetFormatDescription(sampleBuffer) {
+                var paramCount = 0
+                CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                    fmtDesc, parameterSetIndex: 0,
+                    parameterSetPointerOut: nil,
+                    parameterSetSizeOut: nil,
+                    parameterSetCountOut: &paramCount,
+                    nalUnitHeaderLengthOut: nil)
+                for i in 0..<paramCount {
+                    var nalPtr: UnsafePointer<UInt8>? = nil
+                    var nalLen = 0
+                    CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                        fmtDesc, parameterSetIndex: i,
+                        parameterSetPointerOut: &nalPtr,
+                        parameterSetSizeOut: &nalLen,
+                        parameterSetCountOut: nil,
+                        nalUnitHeaderLengthOut: nil)
+                    if let nalPtr = nalPtr, nalLen > 0 {
+                        annexB.append(contentsOf: [0x00, 0x00, 0x00, 0x01])
+                        annexB.append(nalPtr, count: nalLen)
+                    }
+                }
+                encoderFormatDesc = fmtDesc
+            }
+        }
+
+        // Convert AVCC NAL units to Annex B start codes
+        guard let dataBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
+        var totalLength = 0
+        var dataPointer: UnsafeMutablePointer<Int8>? = nil
+        let blockStatus = CMBlockBufferGetDataPointer(
+            dataBuffer, atOffset: 0, lengthAtOffsetOut: nil,
+            totalLengthOut: &totalLength, dataPointerOut: &dataPointer)
+        guard blockStatus == kCMBlockBufferNoErr, let dataPointer = dataPointer else { return }
+
+        var offset = 0
+        while offset < totalLength - 4 {
+            // AVCC: 4-byte big-endian length prefix
+            let rawLen = dataPointer.advanced(by: offset).withMemoryRebound(to: UInt32.self, capacity: 1) { $0.pointee }
+            let nalLen = Int(CFSwapInt32BigToHost(rawLen))
+            offset += 4
+            guard offset + nalLen <= totalLength else { break }
+            annexB.append(contentsOf: [0x00, 0x00, 0x00, 0x01])
+            dataPointer.advanced(by: offset).withMemoryRebound(to: UInt8.self, capacity: nalLen) { ptr in
+                annexB.append(ptr, count: nalLen)
+            }
+            offset += nalLen
+        }
+
+        guard !annexB.isEmpty else { return }
+
+        lastCompressedSize = annexB.count
+        let seq = frameSequence
+        frameSequence &+= 1
+        tcpServer.broadcast(payload: annexB, isKeyframe: isIDR, sequenceNumber: seq)
+    }
+}
+
+// MARK: - C-compatible VTCompressionSession output callback
+
+private func vtOutputCallback(
+    outputCallbackRefCon: UnsafeMutableRawPointer?,
+    sourceFrameRefCon: UnsafeMutableRawPointer?,
+    status: OSStatus,
+    infoFlags: VTEncodeInfoFlags,
+    sampleBuffer: CMSampleBuffer?
+) {
+    guard let refCon = outputCallbackRefCon else { return }
+    let capture = Unmanaged<ScreenCapture>.fromOpaque(refCon).takeUnretainedValue()
+    capture.handleEncoderOutput(status: status, flags: infoFlags, sampleBuffer: sampleBuffer)
 }

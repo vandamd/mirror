@@ -6,22 +6,13 @@ let package = Package(
     platforms: [.macOS(.v14)],
     targets: [
         .target(
-            name: "CLZ4",
-            path: "Sources/CLZ4",
-            publicHeadersPath: "include",
-            cSettings: [
-                .define("LZ4_STATIC_LINKING_ONLY"),
-                .unsafeFlags(["-O3", "-fvectorize"])
-            ]
-        ),
-        .target(
             name: "CVirtualDisplay",
             path: "Sources/CVirtualDisplay",
             publicHeadersPath: "include"
         ),
         .target(
             name: "MirrorEngine",
-            dependencies: ["CLZ4", "CVirtualDisplay"],
+            dependencies: ["CVirtualDisplay"],
             path: "Sources/MirrorEngine"
         ),
         .executableTarget(
