@@ -25,6 +25,11 @@ class CompositorPacer {
     private var toggle = false
     private let targetDisplayID: CGDirectDisplayID
     private var tickCount: UInt64 = 0
+    private var lastTickTime: Double = 0
+    private var tickStatStart: Double = 0
+    private var tickGapSumMs: Double = 0
+    private var tickGapMaxMs: Double = 0
+    private var tickOverruns: UInt64 = 0
 
     init(targetDisplayID: CGDirectDisplayID) {
         self.targetDisplayID = targetDisplayID
@@ -53,6 +58,9 @@ class CompositorPacer {
         let screen = targetScreen ?? NSScreen.main
         let onVirtual = targetScreen != nil
 
+        // Avoid AppKit window tab indexing/background bookkeeping work.
+        NSWindow.allowsAutomaticWindowTabbing = false
+
         // 4x4 dirty region — above any per-pixel compositing threshold
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 4, height: 4),
@@ -63,8 +71,9 @@ class CompositorPacer {
         window.isOpaque = false
         window.hasShadow = false
         window.ignoresMouseEvents = true
-        window.level = .normal
-        window.collectionBehavior = [.canJoinAllSpaces, .stationary]
+        window.level = .screenSaver
+        window.tabbingMode = .disallowed
+        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
         window.backgroundColor = NSColor(red: 0, green: 0, blue: 0, alpha: 1)
 
         // Position at top-left corner of the target screen
@@ -107,13 +116,37 @@ class CompositorPacer {
     }
 
     private func performToggle() {
+        let now = CACurrentMediaTime()
+        let expectedMs = 1000.0 / Double(TARGET_FPS)
+        if lastTickTime > 0 {
+            let gapMs = (now - lastTickTime) * 1000.0
+            tickGapSumMs += gapMs
+            tickGapMaxMs = max(tickGapMaxMs, gapMs)
+            if gapMs > (expectedMs * 1.5) {
+                tickOverruns += 1
+            }
+        } else {
+            tickStatStart = now
+        }
+        lastTickTime = now
+
         toggle.toggle()
         window?.backgroundColor = toggle
             ? NSColor(red: 0, green: 0, blue: 0, alpha: 1)
             : NSColor(red: 1.0 / 255.0, green: 0, blue: 0, alpha: 1)
         tickCount += 1
-        if tickCount % 300 == 0 {
-            print("[Pacer] \(tickCount) ticks (~\(tickCount / 60)s)")
+
+        let elapsed = now - tickStatStart
+        if elapsed >= 5.0 {
+            let fps = Double(tickCount) / max(elapsed, 0.001)
+            let avgGap = tickCount > 1 ? tickGapSumMs / Double(tickCount - 1) : 0
+            print(String(format: "[Pacer] fps: %.1f | avg-gap: %.2fms | max-gap: %.2fms | overruns: %llu",
+                         fps, avgGap, tickGapMaxMs, tickOverruns))
+            tickCount = 0
+            tickStatStart = now
+            tickGapSumMs = 0
+            tickGapMaxMs = 0
+            tickOverruns = 0
         }
     }
 

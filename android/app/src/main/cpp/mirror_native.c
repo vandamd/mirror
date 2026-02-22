@@ -77,7 +77,8 @@ static void set_thread_realtime(const char *name) {
 static int read_exact(int sock, void *buf, int n) {
     int total = 0;
     while (total < n) {
-        int r = recv(sock, (uint8_t *)buf + total, n - total, 0);
+        int r = recv(sock, (uint8_t *)buf + total, n - total, MSG_WAITALL);
+        if (r < 0 && errno == EINTR) continue;
         if (r <= 0) return -1;
         total += r;
     }

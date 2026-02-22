@@ -71,6 +71,9 @@ class ScreenCapture: NSObject {
     var compressTimeSum: Double = 0
     var statFrames: Int = 0
     var lastCompressedSize: Int = 0
+    var lastInflightFrames: Int = 0
+    var lastBackpressureThreshold: Int = 0
+    var lastRTTMs: Double = 0
 
     var jitterSamples: [Double] = []
     var lastCallbackTime: Double = 0
@@ -234,6 +237,9 @@ class ScreenCapture: NSObject {
         // Force IDR every KEYFRAME_INTERVAL frames as a corruption-recovery fallback
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
                              value: KEYFRAME_INTERVAL as CFNumber)
+        let keyframeSeconds = Double(KEYFRAME_INTERVAL) / Double(TARGET_FPS)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration,
+                             value: keyframeSeconds as CFNumber)
         // Expected frame rate — helps rate control
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate,
                              value: TARGET_FPS as CFNumber)
@@ -266,6 +272,9 @@ class ScreenCapture: NSObject {
         let isScheduledKeyframe = (frameCount % KEYFRAME_INTERVAL == 0)
         let rtt = tcpServer.latencyStats?.rttAvgMs ?? 15.0
         let adaptiveThreshold = adaptiveBackpressureThreshold(rttMs: rtt)
+        lastInflightFrames = inflight
+        lastBackpressureThreshold = adaptiveThreshold
+        lastRTTMs = rtt
 
         if inflight > adaptiveThreshold && !isScheduledKeyframe {
             skippedFrames += 1
@@ -343,8 +352,10 @@ class ScreenCapture: NSObject {
             let bw = Double(lastCompressedSize) * fps / 1024 / 1024
             let avgJitter = jitterSamples.isEmpty ? 0.0 : jitterSamples.reduce(0, +) / Double(jitterSamples.count)
 
-            print(String(format: "FPS: %.1f | wrap: %.2fms | encode: %.1fms | jitter: %.1fms | frame: %dKB | ~%.1fMB/s | total: %d | skipped: %d",
-                         fps, avgConvert, avgCompress, avgJitter, lastCompressedSize / 1024, bw, frameCount, skippedFrames))
+            print(String(format: "FPS: %.1f | wrap: %.2fms | encode: %.1fms | jitter: %.1fms | inflight: %d/%d | rtt: %.1fms | frame: %dKB | ~%.1fMB/s | total: %d | skipped: %d",
+                         fps, avgConvert, avgCompress, avgJitter,
+                         lastInflightFrames, lastBackpressureThreshold, lastRTTMs,
+                         lastCompressedSize / 1024, bw, frameCount, skippedFrames))
             onStats?(fps, bw, lastCompressedSize / 1024, frameCount, avgConvert, avgCompress, avgJitter, skippedFrames)
 
             statFrames = 0
