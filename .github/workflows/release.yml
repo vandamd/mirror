@@ -1,3 +1,12 @@
+# Release workflow — builds, signs, notarizes, and publishes Mac DMG + Android APK.
+#
+# Required GitHub secrets:
+#   DEVELOPER_ID_CERT_BASE64  — Developer ID Application cert (.p12), base64 encoded
+#   DEVELOPER_ID_CERT_PASSWORD — Password for the .p12 file
+#   NOTARY_APPLE_ID           — Apple ID for notarytool
+#   NOTARY_PASSWORD            — App-specific password for notarytool
+#   NOTARY_TEAM_ID             — Team ID (6Y24LA63S7)
+
 name: Release Binaries
 
 on:
@@ -19,23 +28,64 @@ jobs:
       - name: Build Mac binary
         run: swift build -c release
 
-      - name: Create .app bundle
+      - name: Import Developer ID certificate
+        env:
+          DEVELOPER_ID_CERT_BASE64: ${{ secrets.DEVELOPER_ID_CERT_BASE64 }}
+          DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_CERT_PASSWORD }}
+        run: |
+          # Create a temporary keychain
+          KEYCHAIN_PATH="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Import certificate
+          CERT_PATH="$RUNNER_TEMP/developer_id.p12"
+          echo "$DEVELOPER_ID_CERT_BASE64" | base64 --decode > "$CERT_PATH"
+          security import "$CERT_PATH" -P "$DEVELOPER_ID_CERT_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+
+          # Add to search list so codesign can find it
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Verify the identity is available
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+      - name: Create and sign .app bundle
         run: |
           APP_NAME="Daylight Mirror"
           APP_BUNDLE="build/$APP_NAME.app"
           BINARY=".build/release/DaylightMirror"
+          IDENTITY="Developer ID Application: Potential, Inc. (6Y24LA63S7)"
 
           mkdir -p "$APP_BUNDLE/Contents/MacOS"
           mkdir -p "$APP_BUNDLE/Contents/Resources"
           cp "$BINARY" "$APP_BUNDLE/Contents/MacOS/DaylightMirror"
 
+          # Also copy CLI binary if it exists
+          if [ -f ".build/release/daylight-mirror" ]; then
+            cp ".build/release/daylight-mirror" "$APP_BUNDLE/Contents/MacOS/daylight-mirror"
+          fi
+
           # Update Info.plist with version from tag
-          sed "s/<string>1.0<\/string>/<string>${{ steps.version.outputs.VERSION }}<\/string>/g" Info.plist > "$APP_BUNDLE/Contents/Info.plist"
+          sed "s/<string>1.0<\/string>/<string>${{ steps.version.outputs.VERSION }}<\/string>/g" \
+            Info.plist > "$APP_BUNDLE/Contents/Info.plist"
 
           cp Resources/AppIcon.icns "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 
-          # Ad-hoc codesign (for local distribution)
-          codesign --force --deep -s - "$APP_BUNDLE"
+          # Sign each binary individually, then the bundle — with hardened runtime for notarization
+          if [ -f "$APP_BUNDLE/Contents/MacOS/daylight-mirror" ]; then
+            codesign -s "$IDENTITY" -f --options runtime --timestamp "$APP_BUNDLE/Contents/MacOS/daylight-mirror"
+          fi
+          codesign -s "$IDENTITY" -f --options runtime --timestamp "$APP_BUNDLE/Contents/MacOS/DaylightMirror"
+          codesign -s "$IDENTITY" -f --options runtime --timestamp "$APP_BUNDLE"
+
+          # Verify
+          codesign -dvv "$APP_BUNDLE"
 
       - name: Create DMG
         run: |
@@ -60,11 +110,40 @@ jobs:
               "DaylightMirror-v${{ steps.version.outputs.VERSION }}.dmg"
           fi
 
+      - name: Sign DMG
+        run: |
+          IDENTITY="Developer ID Application: Potential, Inc. (6Y24LA63S7)"
+          codesign -s "$IDENTITY" --timestamp \
+            "DaylightMirror-v${{ steps.version.outputs.VERSION }}.dmg"
+
+      - name: Notarize DMG
+        env:
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+        run: |
+          xcrun notarytool submit \
+            "DaylightMirror-v${{ steps.version.outputs.VERSION }}.dmg" \
+            --apple-id "$NOTARY_APPLE_ID" \
+            --password "$NOTARY_PASSWORD" \
+            --team-id "$NOTARY_TEAM_ID" \
+            --wait
+
+          # Staple the notarization ticket to the DMG
+          xcrun stapler staple \
+            "DaylightMirror-v${{ steps.version.outputs.VERSION }}.dmg"
+
       - name: Upload DMG
         uses: actions/upload-artifact@v4
         with:
           name: mac-dmg
           path: DaylightMirror-v${{ steps.version.outputs.VERSION }}.dmg
+
+      - name: Cleanup keychain
+        if: always()
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/signing.keychain-db"
+          security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
 
   build-android:
     runs-on: ubuntu-latest
@@ -131,12 +210,19 @@ jobs:
         with:
           name: android-apk
 
+      - name: Create stable-name copies
+        run: |
+          cp "DaylightMirror-v${{ steps.version.outputs.VERSION }}.dmg" DaylightMirror.dmg
+          cp "DaylightMirror-v${{ steps.version.outputs.VERSION }}.apk" DaylightMirror.apk
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           files: |
             DaylightMirror-v${{ steps.version.outputs.VERSION }}.dmg
             DaylightMirror-v${{ steps.version.outputs.VERSION }}.apk
+            DaylightMirror.dmg
+            DaylightMirror.apk
           draft: false
           prerelease: false
           generate_release_notes: true
