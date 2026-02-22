@@ -9,7 +9,10 @@ let package = Package(
             name: "CLZ4",
             path: "Sources/CLZ4",
             publicHeadersPath: "include",
-            cSettings: [.define("LZ4_STATIC_LINKING_ONLY")]
+            cSettings: [
+                .define("LZ4_STATIC_LINKING_ONLY"),
+                .unsafeFlags(["-O3", "-fvectorize"])
+            ]
         ),
         .target(
             name: "CVirtualDisplay",

@@ -12,5 +12,5 @@ target_link_libraries(mirror
     android   # ANativeWindow
     log       # __android_log_print
     EGL
-    GLESv2
+    GLESv3
 )

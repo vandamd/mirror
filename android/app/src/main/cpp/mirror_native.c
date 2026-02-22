@@ -23,9 +23,11 @@
 #include <arpa/inet.h>
 #include <arm_neon.h>
 #include <EGL/egl.h>
-#include <GLES2/gl2.h>
-
+#include <EGL/eglext.h>
+#include <GLES3/gl3.h>
 #include <android/hardware_buffer.h>
+#include <sys/resource.h>
+
 #include "lz4.h"
 
 #ifndef AHARDWAREBUFFER_FORMAT_R8_UNORM
@@ -35,6 +37,17 @@
 #define TAG "DaylightMirror"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+
+static void set_thread_realtime(const char *name) {
+    struct sched_param param;
+    param.sched_priority = sched_get_priority_max(SCHED_FIFO);
+    if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &param) != 0) {
+        setpriority(PRIO_PROCESS, 0, -10);
+        LOGI("%s: SCHED_FIFO unavailable, using nice=-10", name);
+    } else {
+        LOGI("%s: SCHED_FIFO priority %d", name, param.sched_priority);
+    }
+}
 
 // Default resolution (updated dynamically via CMD_RESOLUTION from server)
 #define DEFAULT_FRAME_W 1024
@@ -87,6 +100,10 @@ static EGLContext g_egl_context = EGL_NO_CONTEXT;
 static GLuint g_gl_program = 0;
 static GLuint g_gl_texture = 0;
 static GLuint g_gl_vbo = 0;
+static GLuint g_gl_pbos[2] = {0, 0};  // Double-buffered PBOs for async upload
+static int g_gl_pbo_index = 0;        // PBO currently being written by CPU
+static uint32_t g_gl_pbo_size = 0;    // Allocated PBO size in bytes
+static int g_gl_pbo_primed = 0;       // Both PBOs filled at least once
 static GLint g_gl_attr_position = -1;
 static GLint g_gl_attr_texcoord = -1;
 static GLint g_gl_uniform_texture = -1;
@@ -95,21 +112,24 @@ static uint32_t g_gl_tex_h = 0;
 static int g_gl_ready = 0;
 
 static const char *k_vertex_shader_src =
-    "attribute vec4 a_position;\n"
-    "attribute vec2 a_texcoord;\n"
-    "varying vec2 v_texcoord;\n"
+    "#version 300 es\n"
+    "in vec4 a_position;\n"
+    "in vec2 a_texcoord;\n"
+    "out vec2 v_texcoord;\n"
     "void main() {\n"
     "    gl_Position = a_position;\n"
     "    v_texcoord = a_texcoord;\n"
     "}\n";
 
 static const char *k_fragment_shader_src =
+    "#version 300 es\n"
     "precision mediump float;\n"
-    "varying vec2 v_texcoord;\n"
+    "in vec2 v_texcoord;\n"
     "uniform sampler2D u_texture;\n"
+    "out vec4 fragColor;\n"
     "void main() {\n"
-    "    float grey = texture2D(u_texture, v_texcoord).r;\n"
-    "    gl_FragColor = vec4(grey, grey, grey, 1.0);\n"
+    "    float grey = texture(u_texture, v_texcoord).r;\n"
+    "    fragColor = vec4(grey, grey, grey, 1.0);\n"
     "}\n";
 
 static void gl_teardown(void);
@@ -204,8 +224,8 @@ static int gl_create_texture(uint32_t width, uint32_t height) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, (GLsizei)width, (GLsizei)height,
-                 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, NULL);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, (GLsizei)width, (GLsizei)height,
+                 0, GL_RED, GL_UNSIGNED_BYTE, NULL);
 
     if (glGetError() != GL_NO_ERROR) {
         LOGE("glTexImage2D failed for %ux%u", width, height);
@@ -216,6 +236,17 @@ static int gl_create_texture(uint32_t width, uint32_t height) {
 
     g_gl_tex_w = width;
     g_gl_tex_h = height;
+
+    // Resize PBOs to match new texture dimensions
+    uint32_t new_pbo_size = width * height;
+    if (g_gl_pbos[0] && new_pbo_size != g_gl_pbo_size) {
+        for (int i = 0; i < 2; i++) {
+            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, g_gl_pbos[i]);
+            glBufferData(GL_PIXEL_UNPACK_BUFFER, new_pbo_size, NULL, GL_STREAM_DRAW);
+        }
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+        g_gl_pbo_size = new_pbo_size;
+    }
     return 1;
 }
 
@@ -224,7 +255,7 @@ static int gl_init(ANativeWindow *window) {
     if (g_gl_ready) return 1;
 
     const EGLint config_attribs[] = {
-        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
         EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
         EGL_RED_SIZE, 8,
         EGL_GREEN_SIZE, 8,
@@ -233,7 +264,7 @@ static int gl_init(ANativeWindow *window) {
         EGL_NONE
     };
     const EGLint context_attribs[] = {
-        EGL_CONTEXT_CLIENT_VERSION, 2,
+        EGL_CONTEXT_CLIENT_VERSION, 3,
         EGL_NONE
     };
     static const GLfloat quad_vertices[] = {
@@ -298,6 +329,24 @@ static int gl_init(ANativeWindow *window) {
 
     if (!gl_create_texture(g_frame_w, g_frame_h)) goto fail;
 
+    // Allocate double-buffered PBOs for async CPU→GPU texture upload
+    {
+        uint32_t pbo_size = g_frame_w * g_frame_h;
+        glGenBuffers(2, g_gl_pbos);
+        if (!g_gl_pbos[0] || !g_gl_pbos[1]) {
+            LOGE("glGenBuffers PBO failed");
+            goto fail;
+        }
+        for (int i = 0; i < 2; i++) {
+            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, g_gl_pbos[i]);
+            glBufferData(GL_PIXEL_UNPACK_BUFFER, pbo_size, NULL, GL_STREAM_DRAW);
+        }
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+        g_gl_pbo_size = pbo_size;
+        g_gl_pbo_index = 0;
+        LOGI("PBO allocated: 2x %u bytes (%.1f MB)", pbo_size, pbo_size / 1048576.0f);
+    }
+
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     g_gl_ready = 1;
     return 1;
@@ -320,6 +369,11 @@ static void gl_teardown(void) {
             glDeleteTextures(1, &g_gl_texture);
             g_gl_texture = 0;
         }
+        if (g_gl_pbos[0]) {
+            glDeleteBuffers(2, g_gl_pbos);
+            g_gl_pbos[0] = g_gl_pbos[1] = 0;
+            g_gl_pbo_size = 0;
+        }
         if (g_gl_vbo) {
             glDeleteBuffers(1, &g_gl_vbo);
             g_gl_vbo = 0;
@@ -331,6 +385,8 @@ static void gl_teardown(void) {
         eglMakeCurrent(g_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     } else {
         g_gl_texture = 0;
+        g_gl_pbos[0] = g_gl_pbos[1] = 0;
+        g_gl_pbo_size = 0;
         g_gl_vbo = 0;
         g_gl_program = 0;
     }
@@ -353,6 +409,8 @@ static void gl_teardown(void) {
     g_gl_uniform_texture = -1;
     g_gl_tex_w = 0;
     g_gl_tex_h = 0;
+    g_gl_pbo_index = 0;
+    g_gl_pbo_primed = 0;
     g_gl_ready = 0;
 }
 
@@ -543,6 +601,7 @@ static int reallocate_buffers(uint32_t new_w, uint32_t new_h, uint8_t **decompre
 
 static void *render_thread(void *arg) {
     (void)arg;
+    set_thread_realtime("render_thread");
     uint8_t *render_local = NULL;
     uint32_t render_capacity = 0;
     uint32_t render_w = 0;
@@ -616,9 +675,58 @@ static void *render_thread(void *arg) {
                                           4 * sizeof(GLfloat), (const void *)(2 * sizeof(GLfloat)));
 
                     clock_gettime(CLOCK_MONOTONIC, &t4a);
-                    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
-                                    (GLsizei)render_w, (GLsizei)render_h,
-                                    GL_LUMINANCE, GL_UNSIGNED_BYTE, render_local);
+
+                    if (g_gl_pbos[0] && g_gl_pbo_size == render_w * render_h && g_gl_pbo_primed) {
+                        // Double-buffered PBO upload:
+                        //   pbo_index    → bind for glTexSubImage2D (GPU reads from it, async DMA)
+                        //   1-pbo_index  → map and memcpy new frame data into it (CPU write)
+                        int upload_pbo = g_gl_pbo_index;
+                        int fill_pbo   = 1 - g_gl_pbo_index;
+
+                        // Kick off GPU upload from the previously-filled PBO
+                        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, g_gl_pbos[upload_pbo]);
+                        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
+                                        (GLsizei)render_w, (GLsizei)render_h,
+                                        GL_RED, GL_UNSIGNED_BYTE, 0);
+
+                        // Fill the other PBO with the new frame (orphan + map)
+                        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, g_gl_pbos[fill_pbo]);
+                        glBufferData(GL_PIXEL_UNPACK_BUFFER, g_gl_pbo_size, NULL, GL_STREAM_DRAW);
+                        void *ptr = glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0, g_gl_pbo_size,
+                                                     GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT);
+                        if (ptr) {
+                            memcpy(ptr, render_local, g_gl_pbo_size);
+                            glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
+                        }
+                        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+
+                        g_gl_pbo_index = fill_pbo;
+                    } else if (g_gl_pbos[0] && g_gl_pbo_size == render_w * render_h) {
+                        // Priming phase: fill both PBOs with direct uploads first
+                        int fill_pbo = g_gl_pbo_index;
+                        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, g_gl_pbos[fill_pbo]);
+                        glBufferData(GL_PIXEL_UNPACK_BUFFER, g_gl_pbo_size, NULL, GL_STREAM_DRAW);
+                        void *ptr = glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0, g_gl_pbo_size,
+                                                     GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT);
+                        if (ptr) {
+                            memcpy(ptr, render_local, g_gl_pbo_size);
+                            glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
+                        }
+                        // Upload directly from mapped PBO this frame too
+                        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
+                                        (GLsizei)render_w, (GLsizei)render_h,
+                                        GL_RED, GL_UNSIGNED_BYTE, 0);
+                        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+
+                        g_gl_pbo_index = 1 - fill_pbo;
+                        if (fill_pbo == 1) g_gl_pbo_primed = 1;
+                    } else {
+                        // Fallback: direct upload (PBOs not available or size mismatch)
+                        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
+                                        (GLsizei)render_w, (GLsizei)render_h,
+                                        GL_RED, GL_UNSIGNED_BYTE, render_local);
+                    }
+
                     glDrawArrays(GL_TRIANGLES, 0, 6);
                     clock_gettime(CLOCK_MONOTONIC, &t4b);
 
@@ -687,6 +795,7 @@ static void *render_thread(void *arg) {
 
 static void *decode_thread(void *arg) {
     (void)arg;
+    set_thread_realtime("decode_thread");
     LOGI("Decode thread started, connecting to %s:%d", g_host, g_port);
 
     g_current_frame = (uint8_t *)calloc(g_pixel_count, 1);
@@ -712,6 +821,9 @@ static void *decode_thread(void *arg) {
 
         int flag = 1;
         setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+        setsockopt(sock, IPPROTO_TCP, TCP_QUICKACK, &flag, sizeof(flag));
+        int rcvbuf = 512 * 1024;
+        setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
 
         struct sockaddr_in addr;
         memset(&addr, 0, sizeof(addr));
@@ -771,7 +883,6 @@ static void *decode_thread(void *arg) {
                             }
                             LOGI("Resolution → %ux%u (%u pixels)", new_w, new_h, g_pixel_count);
 
-                            // Notify Activity to switch orientation for portrait/landscape
                             if (g_jvm && g_activity) {
                                 JNIEnv *env2;
                                 int attached2 = 0;
@@ -827,8 +938,8 @@ static void *decode_thread(void *arg) {
                 break;
             }
 
-            uint8_t flags = frame_hdr[0];
-            uint32_t seq = frame_hdr[1] | (frame_hdr[2] << 8) | (frame_hdr[3] << 16) | (frame_hdr[4] << 24);
+            uint8_t flags      = frame_hdr[0];
+            uint32_t seq        = frame_hdr[1] | (frame_hdr[2] << 8) | (frame_hdr[3] << 16) | (frame_hdr[4] << 24);
             uint32_t payload_len = frame_hdr[5] | (frame_hdr[6] << 8) | (frame_hdr[7] << 16) | (frame_hdr[8] << 24);
 
             if (has_last_seq && seq != last_seq + 1) {

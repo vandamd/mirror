@@ -884,3 +884,7 @@ LZ4LIB_API void LZ4_resetStream (LZ4_stream_t* streamPtr);
 #if defined (__cplusplus)
 }
 #endif
+
+/* mirror_xor: dst[i] = a[i] ^ b[i] for n bytes. Compiler auto-vectorizes with AVX2/NEON. */
+#include <stddef.h>
+void mirror_xor(unsigned char *dst, const unsigned char *a, const unsigned char *b, size_t n);

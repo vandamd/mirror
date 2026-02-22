@@ -145,8 +145,10 @@ class ScreenCapture: NSObject {
         let startFn = unsafeBitCast(startSym, to: CGDisplayStreamStartFn.self)
 
         // CGDisplayStream configuration
+        // No minimum frame time — let the display stream deliver frames as fast
+        // as the compositor produces them. The adaptive backpressure in handleFrame
+        // drops frames when Android can't keep up anyway.
         let properties: NSDictionary = [
-            "kCGDisplayStreamMinimumFrameTime": NSNumber(value: 1.0 / Double(TARGET_FPS)),
             "kCGDisplayStreamShowCursor": kCFBooleanTrue as Any
         ]
 
@@ -292,8 +294,12 @@ class ScreenCapture: NSObject {
                 }
                 lastContrastAmount = contrastAmt
             }
-            let lut = contrastLUT
-            for i in 0..<pixelCount { currentGray![i] = lut[Int(currentGray![i])] }
+            var lut = contrastLUT
+            var src = vImage_Buffer(data: currentGray!, height: vImagePixelCount(frameHeight),
+                                    width: vImagePixelCount(frameWidth), rowBytes: frameWidth)
+            var dst = vImage_Buffer(data: currentGray!, height: vImagePixelCount(frameHeight),
+                                    width: vImagePixelCount(frameWidth), rowBytes: frameWidth)
+            vImageTableLookUp_Planar8(&src, &dst, &lut, vImage_Flags(kvImageNoFlags))
         }
 
         let t1 = CACurrentMediaTime()
@@ -323,20 +329,18 @@ class ScreenCapture: NSObject {
         frameSequence &+= 1
 
         if isKeyframe {
-            let compressedSize = LZ4_compress_default(
+            let compressedSize = LZ4_compress_fast(
                 currentGray!, compressedBuffer!, Int32(pixelCount),
-                LZ4_compressBound(Int32(pixelCount))
+                LZ4_compressBound(Int32(pixelCount)), 8
             )
             let payload = Data(bytes: compressedBuffer!, count: Int(compressedSize))
             tcpServer.broadcast(payload: payload, isKeyframe: true, sequenceNumber: seq)
             lastCompressedSize = Int(compressedSize)
         } else {
-            for i in 0..<pixelCount {
-                deltaBuffer![i] = currentGray![i] ^ previousGray![i]
-            }
-            let compressedSize = LZ4_compress_default(
+            mirror_xor(deltaBuffer!, currentGray!, previousGray!, pixelCount)
+            let compressedSize = LZ4_compress_fast(
                 deltaBuffer!, compressedBuffer!, Int32(pixelCount),
-                LZ4_compressBound(Int32(pixelCount))
+                LZ4_compressBound(Int32(pixelCount)), 8
             )
             // Skip trivial deltas — screen barely changed, Android already has the frame
             if compressedSize < TRIVIAL_DELTA_THRESHOLD {
