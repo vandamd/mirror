@@ -114,13 +114,13 @@ static void notify_connection_state(int connected) {
     if (attached) (*g_jvm)->DetachCurrentThread(g_jvm);
 }
 
-// Create and start a MediaCodec H.264 decoder targeting the given Surface.
-// Returns 0 on failure, 1 on success.
-static int create_decoder(ANativeWindow *window, uint32_t width, uint32_t height) {
+// Build and start a MediaCodec H.264 decoder targeting the given Surface.
+// Returns NULL on failure.
+static AMediaCodec *build_decoder(ANativeWindow *window, uint32_t width, uint32_t height) {
     AMediaCodec *codec = AMediaCodec_createDecoderByType("video/avc");
     if (!codec) {
         LOGE("AMediaCodec_createDecoderByType failed");
-        return 0;
+        return NULL;
     }
 
     AMediaFormat *fmt = AMediaFormat_new();
@@ -133,15 +133,42 @@ static int create_decoder(ANativeWindow *window, uint32_t width, uint32_t height
     media_status_t status = AMediaCodec_configure(codec, fmt, window, NULL, 0);
     AMediaFormat_delete(fmt);
     if (status != AMEDIA_OK) {
-        LOGE("AMediaCodec_configure failed: %d", status);
+        LOGE("AMediaCodec_configure failed: %d (%ux%u)", status, width, height);
         AMediaCodec_delete(codec);
-        return 0;
+        return NULL;
     }
 
     status = AMediaCodec_start(codec);
     if (status != AMEDIA_OK) {
-        LOGE("AMediaCodec_start failed: %d", status);
+        LOGE("AMediaCodec_start failed: %d (%ux%u)", status, width, height);
         AMediaCodec_delete(codec);
+        return NULL;
+    }
+
+    return codec;
+}
+
+// Create and start a MediaCodec H.264 decoder targeting the given Surface.
+// Returns 0 on failure, 1 on success.
+static int create_decoder(ANativeWindow *window, uint32_t width, uint32_t height) {
+    AMediaCodec *codec = build_decoder(window, width, height);
+    if (!codec) {
+        // Some devices only allow one active hardware decoder instance.
+        // Retry after tearing down the old instance, if any.
+        pthread_mutex_lock(&g_codec_mutex);
+        AMediaCodec *old = g_codec;
+        g_codec = NULL;
+        pthread_mutex_unlock(&g_codec_mutex);
+
+        if (old) {
+            LOGI("Retrying decoder configure after tearing down old instance");
+            AMediaCodec_stop(old);
+            AMediaCodec_delete(old);
+            codec = build_decoder(window, width, height);
+        }
+    }
+
+    if (!codec) {
         return 0;
     }
 
