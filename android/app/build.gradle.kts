@@ -6,7 +6,7 @@ plugins {
 android {
     namespace = "com.daylight.mirror"
     compileSdk = 34
-    ndkVersion = "26.3.11579264"
+    ndkVersion = "27.1.12297006"
 
     defaultConfig {
         applicationId = "com.daylight.mirror"

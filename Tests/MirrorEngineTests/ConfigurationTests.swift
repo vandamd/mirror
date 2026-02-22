@@ -63,7 +63,7 @@ final class ConfigurationTests: XCTestCase {
     }
 
     func testTargetFPSIs60() {
-        XCTAssertEqual(TARGET_FPS, 60)
+        XCTAssertEqual(TARGET_FPS, 120)
     }
 
     func testTargetFPSDoesNotExceedPanelLimit() {

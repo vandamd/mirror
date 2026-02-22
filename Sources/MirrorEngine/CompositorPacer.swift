@@ -1,7 +1,7 @@
-// CompositorPacer.swift — Dirty pixel trick to force 60fps frame delivery.
+// CompositorPacer.swift — Dirty pixel trick to force frame delivery.
 //
 // Forces the macOS compositor to continuously redraw by toggling a 4x4 pixel
-// window between two nearly-identical colors at 60Hz. Without this, CGDisplayStream
+// window between two nearly-identical colors at TARGET_FPS. Without this, CGDisplayStream
 // only delivers ~13fps for mirrored virtual displays because WindowServer
 // considers static content "clean" and skips recompositing.
 //
@@ -75,25 +75,24 @@ class CompositorPacer {
         self.window = window
 
         // Use CADisplayLink from the target screen for vsync-aligned ticking.
-        // If virtual display has no NSScreen (mirror mode), use a timer at 30Hz.
+        // If virtual display has no NSScreen (mirror mode), use a timer.
         if let targetScreen = targetScreen {
             let dl = targetScreen.displayLink(target: self, selector: #selector(tick))
-            dl.preferredFrameRateRange = CAFrameRateRange(
-                minimum: 30, maximum: 60, preferred: 60
-            )
+            dl.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 120, preferred: Float(TARGET_FPS))
             dl.add(to: .main, forMode: .common)
             self.displayLink = dl
-            print("[Pacer] Started on virtual display \(targetDisplayID) (CADisplayLink, 4x4)")
+            print("[Pacer] Started on virtual display \(targetDisplayID) (CADisplayLink, 4x4, target \(TARGET_FPS)fps)")
         } else {
-            // Fallback: DispatchSourceTimer at ~30Hz
+            // Fallback: DispatchSourceTimer
             let t = DispatchSource.makeTimerSource(queue: .main)
-            t.schedule(deadline: .now(), repeating: .milliseconds(16))
+            let intervalMs = max(4, Int((1000.0 / Double(TARGET_FPS)).rounded()))
+            t.schedule(deadline: .now(), repeating: .milliseconds(intervalMs))
             t.setEventHandler { [weak self] in
                 self?.timerTick()
             }
             t.resume()
             self.timer = t
-            print("[Pacer] Started on main screen (timer fallback, 4x4) — virtual display \(targetDisplayID) has no NSScreen")
+            print("[Pacer] Started on main screen (timer fallback, 4x4, target \(TARGET_FPS)fps) — virtual display \(targetDisplayID) has no NSScreen")
         }
 
         print("[Pacer] Target display: \(targetDisplayID), on virtual screen: \(onVirtual)")

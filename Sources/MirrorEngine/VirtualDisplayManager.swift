@@ -38,7 +38,7 @@ class VirtualDisplayManager {
         let settings = CGVirtualDisplaySettings()
         settings.hiDPI = hiDPI ? 1 : 0
         settings.modes = [
-            CGVirtualDisplayMode(width: width, height: height, refreshRate: 60)
+            CGVirtualDisplayMode(width: width, height: height, refreshRate: 120)
         ]
 
         guard virtualDisplay.apply(settings) else {
@@ -46,7 +46,7 @@ class VirtualDisplayManager {
             return
         }
         let modeLabel = hiDPI ? "HiDPI (\(width/2)x\(height/2)pt @ 2x)" : "non-HiDPI"
-        print("Virtual display configured: \(width)x\(height) \(modeLabel) @ 60Hz")
+        print("Virtual display configured: \(width)x\(height) \(modeLabel) @ 120Hz")
     }
 
     func mirrorBuiltInDisplay() {

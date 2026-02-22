@@ -8,9 +8,9 @@ import Foundation
 let TCP_PORT: UInt16 = 8888
 let WS_PORT: UInt16 = 8890
 let HTTP_PORT: UInt16 = 8891
-let TARGET_FPS: Int = 60  // DC-1 panel supports up to 120Hz; 60fps viable with GL shader + NEON opts
+let TARGET_FPS: Int = 120  // DC-1 panel supports up to 120Hz
 let JPEG_QUALITY: CGFloat = 0.8
-let KEYFRAME_INTERVAL: Int = 60
+let KEYFRAME_INTERVAL: Int = 120
 
 // Image processing for e-ink/greyscale displays.
 // macOS font smoothing produces subpixel-antialiased text that looks fuzzy when
