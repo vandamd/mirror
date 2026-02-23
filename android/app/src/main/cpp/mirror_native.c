@@ -25,6 +25,10 @@
 #include <arpa/inet.h>
 #include <sys/resource.h>
 
+#ifndef AMEDIACODEC_BUFFER_FLAG_KEY_FRAME
+#define AMEDIACODEC_BUFFER_FLAG_KEY_FRAME 2
+#endif
+
 #define TAG "DaylightMirror"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
