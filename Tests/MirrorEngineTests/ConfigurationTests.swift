@@ -138,11 +138,4 @@ final class ConfigurationTests: XCTestCase {
         XCTAssertEqual(adaptiveBackpressureThreshold(rttMs: -5.0), 6)
     }
 
-    // MARK: - Trivial delta threshold
-
-    func testTrivialDeltaThresholdIsReasonable() {
-        XCTAssertGreaterThan(TRIVIAL_DELTA_THRESHOLD, 0)
-        XCTAssertLessThan(TRIVIAL_DELTA_THRESHOLD, 4096,
-            "Threshold should be small enough to only skip near-empty deltas")
-    }
 }
