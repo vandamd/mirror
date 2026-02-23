@@ -314,8 +314,6 @@ class ScreenCapture: NSObject {
         if (inflight > adaptiveThreshold || currentQueueDepth >= maxEncoderQueueDepth) && !isScheduledKeyframe {
             skippedFrames += 1
             forceNextKeyframe = true
-            IOSurfaceLock(surface, .readOnly, nil)
-            IOSurfaceUnlock(surface, .readOnly, nil)
             frameCount += 1
             return
         }
