@@ -546,7 +546,7 @@ func printUsage() {
     print("  resolution [preset]      Get or set resolution (cozy, comfortable, balanced, sharp,")
     print("                             portrait-cozy, portrait-balanced, portrait-sharp)")
     print("  sharpen [0.0-3.0]        Get or set sharpening (0=none, 1=mild, 2=strong)")
-    print("  contrast [1.0-2.0]       Get or set contrast (1.0=off, 1.5=moderate, 2.0=high)")
+    print("  contrast [0.8-1.5]       Get or set contrast (0.8=muted, 1.0=off, 1.2=moderate, 1.5=high)")
     print("  fontsmoothing [on|off]   Get or set macOS font smoothing (off = crisper text)")
     print("  latency                  Print latency diagnostics (RTT, jitter, processing times)")
     print("  latency --watch          Continuously poll latency stats every 2 seconds")
