@@ -9,6 +9,7 @@ let TCP_PORT: UInt16 = 8888
 let WS_PORT: UInt16 = 8890
 let HTTP_PORT: UInt16 = 8891
 let TARGET_FPS: Int = 120  // DC-1 panel supports up to 120Hz
+let ENCODER_BPP: Double = 0.65  // Bits per pixel for near-lossless screen content
 let JPEG_QUALITY: CGFloat = 0.8
 // 0.5s GOP: fast decoder recovery
 let KEYFRAME_INTERVAL: Int = 60

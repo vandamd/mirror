@@ -229,8 +229,7 @@ class ScreenCapture: NSObject {
         // Baseline profile for maximum Android MediaCodec compatibility
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel,
                              value: kVTProfileLevel_H264_Baseline_AutoLevel)
-        // Screen content: ~0.26 bpp gives near-lossless UI at 1600×1200×120fps
-        let bitrate: Int = 60_000_000
+        let bitrate = Int(Double(frameWidth * frameHeight * TARGET_FPS) * ENCODER_BPP)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate,
                              value: bitrate as CFNumber)
         // Force IDR every KEYFRAME_INTERVAL frames as a corruption-recovery fallback
