@@ -10,8 +10,8 @@ let WS_PORT: UInt16 = 8890
 let HTTP_PORT: UInt16 = 8891
 let TARGET_FPS: Int = 120  // DC-1 panel supports up to 120Hz
 let JPEG_QUALITY: CGFloat = 0.8
-// 2s GOP at 120fps: reduces periodic IDR spikes while still recovering quickly.
-let KEYFRAME_INTERVAL: Int = 240
+// 0.5s GOP: fast decoder recovery
+let KEYFRAME_INTERVAL: Int = 60
 
 // Image processing for e-ink/greyscale displays.
 // macOS font smoothing produces subpixel-antialiased text that looks fuzzy when
