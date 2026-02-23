@@ -682,6 +682,26 @@ struct MirrorMenuView: View {
                 .foregroundStyle(.tertiary)
         }
 
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Image(systemName: "circle.lefthalf.filled")
+                    .font(.caption2)
+                Slider(
+                    value: Binding(
+                        get: { engine.contrastAmount },
+                        set: { engine.contrastAmount = $0 }
+                    ),
+                    in: 0.8...1.5,
+                    step: 0.05
+                )
+                Image(systemName: "circle.righthalf.filled")
+                    .font(.caption2)
+            }
+            Text("Contrast: \(String(format: "%.2f", engine.contrastAmount))")
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
+        }
+
         Divider()
 
         // Auto-reconnect toggle

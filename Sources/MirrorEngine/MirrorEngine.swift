@@ -80,7 +80,7 @@ public class MirrorEngine: ObservableObject {
         let saved = UserDefaults.standard.string(forKey: "resolution") ?? ""
         self.resolution = DisplayResolution(rawValue: saved) ?? .sharp
         let savedSharpen = UserDefaults.standard.double(forKey: "sharpenAmount")
-        self.sharpenAmount = savedSharpen > 0 ? savedSharpen : 1.0
+        self.sharpenAmount = savedSharpen > 0 ? savedSharpen : 0.0
         let savedContrast = UserDefaults.standard.double(forKey: "contrastAmount")
         self.contrastAmount = savedContrast > 0 ? savedContrast : 1.0
         if UserDefaults.standard.object(forKey: "autoMirrorEnabled") != nil {

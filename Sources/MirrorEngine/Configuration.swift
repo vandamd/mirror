@@ -11,7 +11,7 @@ let HTTP_PORT: UInt16 = 8891
 let TARGET_FPS: Int = 120  // DC-1 panel supports up to 120Hz
 let ENCODER_BPP: Double = 0.45  // HEVC with preprocessing - balance quality vs bandwidth
 let JPEG_QUALITY: CGFloat = 0.8
-let CONTRAST_AMOUNT: Float = 1.0  // 1.0 = no change, >1 = darker/more contrast
+let CONTRAST_AMOUNT: Float = 1.0  // 1.0 = no change
 let SHARPEN_AMOUNT: Float = 0.0  // 0 = off, was too aggressive
 let KEYFRAME_INTERVAL: Int = 60
 
