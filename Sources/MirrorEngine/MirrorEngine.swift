@@ -38,10 +38,16 @@ public class MirrorEngine: ObservableObject {
     @Published public var rttP95Ms: Double = 0     // 95th percentile RTT
     @Published public var skippedFrames: Int = 0  // Frames skipped due to Android backpressure
     @Published public var sharpenAmount: Double = 1.0 {
-        didSet { UserDefaults.standard.set(sharpenAmount, forKey: "sharpenAmount") }
+        didSet {
+            UserDefaults.standard.set(sharpenAmount, forKey: "sharpenAmount")
+            capture?.setProcessing(contrast: Float(contrastAmount), sharpen: Float(sharpenAmount))
+        }
     }
     @Published public var contrastAmount: Double = 1.0 {
-        didSet { UserDefaults.standard.set(contrastAmount, forKey: "contrastAmount") }
+        didSet {
+            UserDefaults.standard.set(contrastAmount, forKey: "contrastAmount")
+            capture?.setProcessing(contrast: Float(contrastAmount), sharpen: Float(sharpenAmount))
+        }
     }
     @Published public var fontSmoothingDisabled: Bool = false
     @Published public var deviceDetected: Bool = false
@@ -355,6 +361,7 @@ public class MirrorEngine: ObservableObject {
             }
         }
         capture = cap
+        cap.setProcessing(contrast: Float(contrastAmount), sharpen: Float(sharpenAmount))
 
         do {
             try await cap.start()

@@ -1,10 +1,10 @@
-// mirror_native.c — Daylight Mirror native receiver with MediaCodec H.264 decode.
+// mirror_native.c — Daylight Mirror native receiver with MediaCodec HEVC decode.
 //
-// Receives H.264 Annex B NAL units over TCP (ADB reverse tunnel),
+// Receives HEVC Annex B NAL units over TCP (ADB reverse tunnel),
 // feeds them into a MediaCodec hardware decoder configured with a Surface,
 // and lets the hardware compositor render directly — zero CPU copy in the hot path.
 //
-// Protocol: [0xDA 0x7E] [flags:1B] [seq:4B LE] [length:4B LE] [H.264 Annex B payload]
+// Protocol: [0xDA 0x7E] [flags:1B] [seq:4B LE] [length:4B LE] [HEVC Annex B payload]
 //   flags bit 0: 1=IDR (keyframe), 0=inter frame
 // ACK:      [0xDA 0x7A] [seq:4B LE] — sent back after each frame is queued to decoder
 
@@ -27,6 +27,9 @@
 
 #ifndef AMEDIACODEC_BUFFER_FLAG_KEY_FRAME
 #define AMEDIACODEC_BUFFER_FLAG_KEY_FRAME 2
+#endif
+#ifndef AMEDIAFORMAT_KEY_LOW_LATENCY
+#define AMEDIAFORMAT_KEY_LOW_LATENCY "low-latency"
 #endif
 
 #define TAG "DaylightMirror"
@@ -118,21 +121,18 @@ static void notify_connection_state(int connected) {
     if (attached) (*g_jvm)->DetachCurrentThread(g_jvm);
 }
 
-// Build and start a MediaCodec H.264 decoder targeting the given Surface.
-// Returns NULL on failure.
 static AMediaCodec *build_decoder(ANativeWindow *window, uint32_t width, uint32_t height) {
-    AMediaCodec *codec = AMediaCodec_createDecoderByType("video/avc");
+    AMediaCodec *codec = AMediaCodec_createDecoderByType("video/hevc");
     if (!codec) {
         LOGE("AMediaCodec_createDecoderByType failed");
         return NULL;
     }
 
     AMediaFormat *fmt = AMediaFormat_new();
-    AMediaFormat_setString(fmt, AMEDIAFORMAT_KEY_MIME, "video/avc");
+    AMediaFormat_setString(fmt, AMEDIAFORMAT_KEY_MIME, "video/hevc");
     AMediaFormat_setInt32(fmt, AMEDIAFORMAT_KEY_WIDTH, (int32_t)width);
     AMediaFormat_setInt32(fmt, AMEDIAFORMAT_KEY_HEIGHT, (int32_t)height);
-    // Low latency mode (API 30+) — reduces decoder-side buffering
-    AMediaFormat_setInt32(fmt, "low-latency", 1);
+    AMediaFormat_setInt32(fmt, AMEDIAFORMAT_KEY_LOW_LATENCY, 1);
 
     media_status_t status = AMediaCodec_configure(codec, fmt, window, NULL, 0);
     AMediaFormat_delete(fmt);
@@ -186,7 +186,7 @@ static int create_decoder(ANativeWindow *window, uint32_t width, uint32_t height
     g_frame_h = height;
     pthread_mutex_unlock(&g_codec_mutex);
 
-    LOGI("MediaCodec H.264 decoder started: %ux%u", width, height);
+    LOGI("MediaCodec HEVC decoder started: %ux%u", width, height);
     return 1;
 }
 
