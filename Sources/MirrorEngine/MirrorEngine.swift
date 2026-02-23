@@ -5,7 +5,7 @@
 // monitoring, and the control socket for CLI integration.
 //
 // Used by both the CLI (`daylight-mirror`) and the menu bar app (`DaylightMirror`).
-// All heavy lifting is zero-GPU: vImage SIMD greyscale + LZ4 delta compression.
+// Encoding: VideoToolbox H.264 hardware encode for low-latency streaming.
 //
 // Individual components live in their own files (see Configuration.swift,
 // ADBBridge.swift, ScreenCapture.swift, etc.). This file contains only the

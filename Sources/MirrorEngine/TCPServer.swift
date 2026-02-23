@@ -1,8 +1,8 @@
 // TCPServer.swift — Native TCP frame server for Daylight Mirror.
 //
-// Sends LZ4-compressed greyscale frames to connected Android clients over raw TCP.
-// Protocol: [DA 7E] [flags] [len:4 LE] [payload]. Keyframes are full LZ4, deltas
-// are XOR + LZ4. Also sends resolution and brightness/warmth commands.
+// Sends H.264 Annex B NAL units to connected Android clients over raw TCP.
+// Protocol: [DA 7E] [flags] [seq:4 LE] [len:4 LE] [payload]. Also sends
+// resolution and brightness/warmth commands.
 
 import Foundation
 import Network
