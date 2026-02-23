@@ -88,6 +88,8 @@ class ScreenCapture: NSObject {
     // VideoToolbox encoder
     private var vtSession: VTCompressionSession?
     private var encoderFormatDesc: CMFormatDescription?
+    private var vtSessionSelfRef: Unmanaged<ScreenCapture>?
+
 
     // Frame dimensions
     var frameWidth: Int = 0
@@ -223,6 +225,10 @@ class ScreenCapture: NSObject {
             VTCompressionSessionInvalidate(session)
             vtSession = nil
         }
+        if let ref = vtSessionSelfRef {
+            _ = ref.takeRetainedValue()
+            vtSessionSelfRef = nil
+        }
         encoderFormatDesc = nil
     }
 
@@ -249,7 +255,11 @@ class ScreenCapture: NSObject {
             ] as CFDictionary,
             compressedDataAllocator: nil,
             outputCallback: vtOutputCallback,
-            refcon: Unmanaged.passUnretained(self).toOpaque(),
+            refcon: {
+                let ref = Unmanaged.passRetained(self)
+                self.vtSessionSelfRef = ref
+                return ref.toOpaque()
+            }(),
             compressionSessionOut: &session
         )
         guard status == noErr, let session = session else {
