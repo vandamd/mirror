@@ -218,8 +218,7 @@ static int feed_nal(const uint8_t *data, size_t len, int is_idr, uint32_t seq, i
     ssize_t input_idx = AMediaCodec_dequeueInputBuffer(codec, 2000);
     if (input_idx < 0) {
         pthread_mutex_unlock(&g_codec_mutex);
-        // Timeout is OK — just skip this frame
-        send_ack(sock, seq);
+        // Timeout — frame dropped, don't ACK (Mac won't see ACK for dropped frame)
         return 1;
     }
 
