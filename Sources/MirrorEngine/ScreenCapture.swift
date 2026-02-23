@@ -302,6 +302,7 @@ class ScreenCapture: NSObject {
         let t2 = CACurrentMediaTime()
 
         guard let pixelBuffer = processedBuffer, let session = vtSession else {
+            IOSurfaceUnlock(surface, .readOnly, nil)
             frameCount += 1
             return
         }
