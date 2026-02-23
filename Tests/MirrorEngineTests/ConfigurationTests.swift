@@ -62,7 +62,7 @@ final class ConfigurationTests: XCTestCase {
         XCTAssertEqual(DisplayResolution.portraitSharp.height, 1600)
     }
 
-    func testTargetFPSIs60() {
+    func testTargetFPSIs120() {
         XCTAssertEqual(TARGET_FPS, 120)
     }
 
