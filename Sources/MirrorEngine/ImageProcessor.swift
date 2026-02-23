@@ -9,6 +9,10 @@ class ImageProcessor {
     var contrast: Float = 1.0
     var sharpen: Float = 0.0
     
+    private var bufferPool: CVPixelBufferPool?
+    private var poolWidth: Int = 0
+    private var poolHeight: Int = 0
+    
     init?() {
         guard let device = MTLCreateSystemDefaultDevice() else {
             print("ImageProcessor: Metal not available")
@@ -16,6 +20,38 @@ class ImageProcessor {
         }
         self.ciContext = CIContext(mtlDevice: device, options: [.useSoftwareRenderer: false])
         print("ImageProcessor: CIContext ready (grayscale pipeline)")
+    }
+    
+    private func getOrCreatePool(width: Int, height: Int) -> CVPixelBufferPool? {
+        if let pool = bufferPool, poolWidth == width, poolHeight == height {
+            return pool
+        }
+        
+        let poolAttributes: [String: Any] = [
+            kCVPixelBufferPoolMinimumBufferCountKey as String: 3
+        ]
+        let pixelBufferAttributes: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: width,
+            kCVPixelBufferHeightKey as String: height,
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:],
+            kCVPixelBufferPoolAllocationThresholdKey as String: 5
+        ]
+        
+        var newPool: CVPixelBufferPool?
+        let status = CVPixelBufferPoolCreate(
+            nil,
+            poolAttributes as CFDictionary,
+            pixelBufferAttributes as CFDictionary,
+            &newPool
+        )
+        
+        guard status == kCVReturnSuccess, let pool = newPool else { return nil }
+        
+        bufferPool = pool
+        poolWidth = width
+        poolHeight = height
+        return pool
     }
     
     func processCI(surface: IOSurface) -> CVPixelBuffer? {
@@ -42,15 +78,13 @@ class ImageProcessor {
             ])
         }
         
+        let width = IOSurfaceGetWidth(surface)
+        let height = IOSurfaceGetHeight(surface)
+        
+        guard let pool = getOrCreatePool(width: width, height: height) else { return nil }
+        
         var pixelBuffer: CVPixelBuffer?
-        let status = CVPixelBufferCreate(
-            nil,
-            IOSurfaceGetWidth(surface),
-            IOSurfaceGetHeight(surface),
-            kCVPixelFormatType_32BGRA,
-            [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary,
-            &pixelBuffer
-        )
+        let status = CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pixelBuffer)
         
         guard status == kCVReturnSuccess, let pb = pixelBuffer else { return nil }
         
