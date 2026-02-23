@@ -81,6 +81,8 @@ class ScreenCapture: NSObject {
     var lastInflightFrames: Int = 0
     var lastBackpressureThreshold: Int = 0
     var lastRTTMs: Double = 0
+    var encoderQueueDepth: Int = 0
+    let maxEncoderQueueDepth = 3
 
     var jitterSamples: [Double] = []
     var lastCallbackTime: Double = 0
@@ -242,6 +244,8 @@ class ScreenCapture: NSObject {
                              value: keyframeSeconds as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate,
                              value: TARGET_FPS as CFNumber)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount,
+                             value: 0 as CFNumber)
 
         VTCompressionSessionPrepareToEncodeFrames(session)
         vtSession = session
@@ -266,7 +270,7 @@ class ScreenCapture: NSObject {
         }
         lastCallbackTime = t0
 
-        // Backpressure: drop frames when Android can't keep up
+        // Backpressure: drop frames when Android can't keep up or encoder queue is full
         let inflight = tcpServer.inflightFrames
         let isScheduledKeyframe = (frameCount % KEYFRAME_INTERVAL == 0)
         let rtt = tcpServer.latencyStats?.rttAvgMs ?? 15.0
@@ -275,7 +279,7 @@ class ScreenCapture: NSObject {
         lastBackpressureThreshold = adaptiveThreshold
         lastRTTMs = rtt
 
-        if inflight > adaptiveThreshold && !isScheduledKeyframe {
+        if (inflight > adaptiveThreshold || encoderQueueDepth >= maxEncoderQueueDepth) && !isScheduledKeyframe {
             skippedFrames += 1
             forceNextKeyframe = true
             IOSurfaceLock(surface, .readOnly, nil)
@@ -313,6 +317,7 @@ class ScreenCapture: NSObject {
         }
 
         let presentationTime = CMTimeMake(value: Int64(frameCount), timescale: Int32(TARGET_FPS))
+        encoderQueueDepth += 1
         VTCompressionSessionEncodeFrame(
             session,
             imageBuffer: pixelBuffer,
@@ -340,9 +345,9 @@ class ScreenCapture: NSObject {
             let bw = Double(lastCompressedSize) * fps / 1024 / 1024
             let avgJitter = jitterSamples.isEmpty ? 0.0 : jitterSamples.reduce(0, +) / Double(jitterSamples.count)
 
-            print(String(format: "FPS: %.1f | process: %.2fms | encode: %.1fms | jitter: %.1fms | inflight: %d/%d | rtt: %.1fms | frame: %dKB | ~%.1fMB/s | total: %d | skipped: %d",
+            print(String(format: "FPS: %.1f | process: %.2fms | encode: %.1fms | jitter: %.1fms | inflight: %d/%d | encQ: %d | rtt: %.1fms | frame: %dKB | ~%.1fMB/s | total: %d | skipped: %d",
                          fps, avgProcess, avgCompress, avgJitter,
-                         lastInflightFrames, lastBackpressureThreshold, lastRTTMs,
+                         lastInflightFrames, lastBackpressureThreshold, encoderQueueDepth, lastRTTMs,
                          lastCompressedSize / 1024, bw, frameCount, skippedFrames))
             onStats?(fps, bw, lastCompressedSize / 1024, frameCount, avgProcess, avgCompress, avgJitter, skippedFrames)
 
@@ -356,6 +361,7 @@ class ScreenCapture: NSObject {
     // MARK: - VTCompressionSession output callback
 
     func handleEncoderOutput(status: OSStatus, flags: VTEncodeInfoFlags, sampleBuffer: CMSampleBuffer?) {
+        encoderQueueDepth = max(0, encoderQueueDepth - 1)
         guard status == noErr, let sampleBuffer = sampleBuffer else { return }
         guard !flags.contains(.frameDropped) else { return }
 
