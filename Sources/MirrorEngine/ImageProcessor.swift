@@ -6,8 +6,8 @@ import Metal
 class ImageProcessor {
     let ciContext: CIContext
     
-    var contrast: Float = 1.3
-    var sharpen: Float = 1.0
+    var contrast: Float = 1.0
+    var sharpen: Float = 0.0
     
     init?() {
         guard let device = MTLCreateSystemDefaultDevice() else {
@@ -15,7 +15,7 @@ class ImageProcessor {
             return nil
         }
         self.ciContext = CIContext(mtlDevice: device, options: [.useSoftwareRenderer: false])
-        print("ImageProcessor: CIContext ready")
+        print("ImageProcessor: CIContext ready (grayscale pipeline)")
     }
     
     func processCI(surface: IOSurface) -> CVPixelBuffer? {
@@ -23,12 +23,19 @@ class ImageProcessor {
         
         var processed = ciImage
         
+        // 1. Grayscale (BT.601 luminance: 0.114R + 0.587G + 0.301B)
+        processed = processed.applyingFilter("CIColorControls", parameters: [
+            kCIInputSaturationKey: 0.0
+        ])
+        
+        // 2. Contrast enhancement
         if contrast != 1.0 {
             processed = processed.applyingFilter("CIColorControls", parameters: [
                 kCIInputContrastKey: NSNumber(value: contrast)
             ])
         }
         
+        // 3. Sharpen (unsharp mask)
         if sharpen > 0 {
             processed = processed.applyingFilter("CISharpenLuminance", parameters: [
                 kCIInputSharpnessKey: NSNumber(value: sharpen * 0.5)

@@ -294,8 +294,7 @@ class ScreenCapture: NSObject {
         
         let t1 = CACurrentMediaTime()
         let processedBuffer: CVPixelBuffer?
-        if let processor = imageProcessor,
-           processor.sharpen > 0 || processor.contrast != 1.0 {
+        if let processor = imageProcessor {
             processedBuffer = processor.processCI(surface: iosurfaceObj)
         } else {
             var pbUnmanaged: Unmanaged<CVPixelBuffer>?
