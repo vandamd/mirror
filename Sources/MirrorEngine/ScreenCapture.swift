@@ -144,6 +144,7 @@ class ScreenCapture: NSObject {
         let startFn  = unsafeBitCast(startSym,  to: CGDisplayStreamStartFn.self)
 
         let properties: NSDictionary = [
+            "kCGDisplayStreamMinimumFrameTime": NSNumber(value: 1.0 / Double(TARGET_FPS)),
             "kCGDisplayStreamShowCursor": kCFBooleanTrue as Any
         ]
 
