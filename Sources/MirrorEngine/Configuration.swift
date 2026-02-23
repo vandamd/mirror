@@ -13,7 +13,8 @@ let ENCODER_BPP: Double = 0.45  // HEVC with preprocessing - balance quality vs 
 let JPEG_QUALITY: CGFloat = 0.8
 let CONTRAST_AMOUNT: Float = 1.0  // 1.0 = no change
 let SHARPEN_AMOUNT: Float = 0.0  // 0 = off, was too aggressive
-let KEYFRAME_INTERVAL: Int = 60
+let KEYFRAME_INTERVAL: Int = 120
+
 
 // Image processing for e-ink/greyscale displays.
 // macOS font smoothing produces subpixel-antialiased text that looks fuzzy when
