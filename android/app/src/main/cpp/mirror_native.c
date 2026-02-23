@@ -260,11 +260,6 @@ static void *decode_thread(void *arg) {
     set_thread_realtime("decode_thread");
     LOGI("Decode thread started, connecting to %s:%d", g_host, g_port);
 
-    // Ensure decoder is created before we start receiving frames
-    if (g_window && !g_codec) {
-        create_decoder(g_window, g_frame_w, g_frame_h);
-    }
-
     // Initial receive buffer
     g_nal_buf_capacity = 2 * 1024 * 1024;  // 2MB — plenty for any single access unit
     g_nal_buf = (uint8_t *)malloc(g_nal_buf_capacity);
