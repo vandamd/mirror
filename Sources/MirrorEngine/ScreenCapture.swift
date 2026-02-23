@@ -13,6 +13,7 @@ import QuartzCore
 import VideoToolbox
 import CoreMedia
 import Metal
+import os.lock
 
 // MARK: - Screen Capture Errors
 
@@ -90,6 +91,9 @@ class ScreenCapture: NSObject {
 
     /// Callback: (fps, bandwidthMB, frameSizeKB, totalFrames, greyMs, compressMs, jitterMs, skipped)
     var onStats: ((Double, Double, Int, Int, Double, Double, Double, Int) -> Void)?
+
+    // Synchronization lock for shared state accessed from multiple threads
+    private var encoderLock = os_unfair_lock()
 
     let expectedWidth: Int
     let expectedHeight: Int
@@ -279,7 +283,11 @@ class ScreenCapture: NSObject {
         lastBackpressureThreshold = adaptiveThreshold
         lastRTTMs = rtt
 
-        if (inflight > adaptiveThreshold || encoderQueueDepth >= maxEncoderQueueDepth) && !isScheduledKeyframe {
+        os_unfair_lock_lock(&encoderLock)
+        let currentQueueDepth = encoderQueueDepth
+        os_unfair_lock_unlock(&encoderLock)
+        
+        if (inflight > adaptiveThreshold || currentQueueDepth >= maxEncoderQueueDepth) && !isScheduledKeyframe {
             skippedFrames += 1
             forceNextKeyframe = true
             IOSurfaceLock(surface, .readOnly, nil)
@@ -317,7 +325,9 @@ class ScreenCapture: NSObject {
         }
 
         let presentationTime = CMTimeMake(value: Int64(frameCount), timescale: Int32(TARGET_FPS))
+        os_unfair_lock_lock(&encoderLock)
         encoderQueueDepth += 1
+        os_unfair_lock_unlock(&encoderLock)
         VTCompressionSessionEncodeFrame(
             session,
             imageBuffer: pixelBuffer,
@@ -342,14 +352,20 @@ class ScreenCapture: NSObject {
             let fps = Double(statFrames) / now.timeIntervalSince(lastStatTime)
             let avgProcess = statFrames > 0 ? convertTimeSum / Double(statFrames) : 0
             let avgCompress = statFrames > 0 ? compressTimeSum / Double(statFrames) : 0
-            let bw = Double(lastCompressedSize) * fps / 1024 / 1024
+            
+            os_unfair_lock_lock(&encoderLock)
+            let currentQueueDepth = encoderQueueDepth
+            let currentCompressedSize = lastCompressedSize
+            os_unfair_lock_unlock(&encoderLock)
+            
+            let bw = Double(currentCompressedSize) * fps / 1024 / 1024
             let avgJitter = jitterSamples.isEmpty ? 0.0 : jitterSamples.reduce(0, +) / Double(jitterSamples.count)
 
             print(String(format: "FPS: %.1f | process: %.2fms | encode: %.1fms | jitter: %.1fms | inflight: %d/%d | encQ: %d | rtt: %.1fms | frame: %dKB | ~%.1fMB/s | total: %d | skipped: %d",
                          fps, avgProcess, avgCompress, avgJitter,
-                         lastInflightFrames, lastBackpressureThreshold, encoderQueueDepth, lastRTTMs,
-                         lastCompressedSize / 1024, bw, frameCount, skippedFrames))
-            onStats?(fps, bw, lastCompressedSize / 1024, frameCount, avgProcess, avgCompress, avgJitter, skippedFrames)
+                         lastInflightFrames, lastBackpressureThreshold, currentQueueDepth, lastRTTMs,
+                         currentCompressedSize / 1024, bw, frameCount, skippedFrames))
+            onStats?(fps, bw, currentCompressedSize / 1024, frameCount, avgProcess, avgCompress, avgJitter, skippedFrames)
 
             statFrames = 0
             convertTimeSum = 0
@@ -361,7 +377,9 @@ class ScreenCapture: NSObject {
     // MARK: - VTCompressionSession output callback
 
     func handleEncoderOutput(status: OSStatus, flags: VTEncodeInfoFlags, sampleBuffer: CMSampleBuffer?) {
+        os_unfair_lock_lock(&encoderLock)
         encoderQueueDepth = max(0, encoderQueueDepth - 1)
+        os_unfair_lock_unlock(&encoderLock)
         guard status == noErr, let sampleBuffer = sampleBuffer else { return }
         guard !flags.contains(.frameDropped) else { return }
 
@@ -424,9 +442,11 @@ class ScreenCapture: NSObject {
 
         guard !annexB.isEmpty else { return }
 
+        os_unfair_lock_lock(&encoderLock)
         lastCompressedSize = annexB.count
         let seq = frameSequence
         frameSequence &+= 1
+        os_unfair_lock_unlock(&encoderLock)
         tcpServer.broadcast(payload: annexB, isKeyframe: isIDR, sequenceNumber: seq)
     }
 }
