@@ -40,6 +40,29 @@ private typealias CGDisplayStreamCreateFn = @convention(c) (
 private typealias CGDisplayStreamStartFn = @convention(c) (OpaquePointer) -> Int32
 private typealias CGDisplayStreamStopFn = @convention(c) (OpaquePointer) -> Int32
 
+private func copyPixelBuffer(_ source: CVPixelBuffer) -> CVPixelBuffer? {
+    CVPixelBufferLockBaseAddress(source, .readOnly)
+    defer { CVPixelBufferUnlockBaseAddress(source, .readOnly) }
+    
+    let width = CVPixelBufferGetWidth(source)
+    let height = CVPixelBufferGetHeight(source)
+    let format = CVPixelBufferGetPixelFormatType(source)
+    
+    var copy: CVPixelBuffer?
+    let status = CVPixelBufferCreate(nil, width, height, format, nil, &copy)
+    guard status == kCVReturnSuccess, let dest = copy else { return nil }
+    
+    CVPixelBufferLockBaseAddress(dest, [])
+    defer { CVPixelBufferUnlockBaseAddress(dest, []) }
+    
+    let srcPtr = CVPixelBufferGetBaseAddress(source)
+    let destPtr = CVPixelBufferGetBaseAddress(dest)
+    let srcBytes = CVPixelBufferGetDataSize(source)
+    memcpy(destPtr, srcPtr, srcBytes)
+    
+    return dest
+}
+
 func adaptiveBackpressureThreshold(rttMs: Double) -> Int {
     max(2, min(6, Int(120.0 / max(rttMs, 1.0))))
 }
@@ -310,7 +333,11 @@ class ScreenCapture: NSObject {
         } else {
             var pbUnmanaged: Unmanaged<CVPixelBuffer>?
             CVPixelBufferCreateWithIOSurface(nil, iosurfaceObj, nil, &pbUnmanaged)
-            processedBuffer = pbUnmanaged?.takeRetainedValue()
+            if let wrappedBuffer = pbUnmanaged?.takeRetainedValue() {
+                processedBuffer = copyPixelBuffer(wrappedBuffer)
+            } else {
+                processedBuffer = nil
+            }
         }
         let t2 = CACurrentMediaTime()
 
