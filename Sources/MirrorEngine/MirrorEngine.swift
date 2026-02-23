@@ -31,8 +31,8 @@ public class MirrorEngine: ObservableObject {
     @Published public var clientCount: Int = 0
     @Published public var totalFrames: Int = 0
     @Published public var frameSizeKB: Int = 0
-    @Published public var greyMs: Double = 0      // Greyscale + sharpen time per frame
-    @Published public var compressMs: Double = 0   // LZ4 delta compress time per frame
+    @Published public var greyMs: Double = 0      // Image processing time (contrast + sharpen)
+    @Published public var compressMs: Double = 0   // HEVC encode time per frame
     @Published public var jitterMs: Double = 0     // SCStream delivery jitter (deviation from expected interval)
     @Published public var rttMs: Double = 0        // Round-trip latency (Mac send → Android ACK)
     @Published public var rttP95Ms: Double = 0     // 95th percentile RTT
