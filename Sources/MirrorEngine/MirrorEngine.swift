@@ -59,8 +59,6 @@ public class MirrorEngine: ObservableObject {
 
     private var displayManager: VirtualDisplayManager?
     private var tcpServer: TCPServer?
-    private var wsServer: WebSocketServer?
-    private var httpServer: HTTPServer?
     private var capture: ScreenCapture?
     private var displayController: DisplayController?
     private var compositorPacer: CompositorPacer?
@@ -320,13 +318,6 @@ public class MirrorEngine: ObservableObject {
             tcp.start()
             tcpServer = tcp
 
-            let ws = try WebSocketServer(port: WS_PORT)
-            ws.start()
-            wsServer = ws
-
-            let http = try HTTPServer(port: HTTP_PORT, width: w, height: h)
-            http.start()
-            httpServer = http
         } catch {
             status = .error("Server failed: \(error.localizedDescription)")
             displayManager = nil
@@ -344,7 +335,7 @@ public class MirrorEngine: ObservableObject {
 
         // 5. Capture
         let cap = ScreenCapture(
-            tcpServer: tcpServer!, wsServer: wsServer!,
+            tcpServer: tcpServer!,
             targetDisplayID: displayManager!.displayID,
             width: Int(w), height: Int(h)
         )
@@ -368,15 +359,15 @@ public class MirrorEngine: ObservableObject {
         } catch let error as ScreenCaptureError {
             status = .error(error.localizedDescription)
             compositorPacer?.stop(); compositorPacer = nil
-            tcpServer?.stop(); wsServer?.stop(); httpServer?.stop()
-            tcpServer = nil; wsServer = nil; httpServer = nil
+            tcpServer?.stop()
+            tcpServer = nil
             displayManager = nil
             return
         } catch {
             status = .error("Capture failed: \(error.localizedDescription)")
             compositorPacer?.stop(); compositorPacer = nil
-            tcpServer?.stop(); wsServer?.stop(); httpServer?.stop()
-            tcpServer = nil; wsServer = nil; httpServer = nil
+            tcpServer?.stop()
+            tcpServer = nil
             displayManager = nil
             return
         }
@@ -404,8 +395,6 @@ public class MirrorEngine: ObservableObject {
 
         print("---")
         print("Native TCP:  tcp://localhost:\(TCP_PORT)")
-        print("WS fallback: ws://localhost:\(WS_PORT)")
-        print("HTML page:   http://localhost:\(HTTP_PORT)")
         print("Virtual display \(displayManager!.displayID): \(w)x\(h)")
     }
 
@@ -489,11 +478,7 @@ public class MirrorEngine: ObservableObject {
             capture = nil
 
             tcpServer?.stop()
-            wsServer?.stop()
-            httpServer?.stop()
             tcpServer = nil
-            wsServer = nil
-            httpServer = nil
 
             // Virtual display disappears on dealloc, mirroring reverts
             displayManager = nil

@@ -47,7 +47,6 @@ func adaptiveBackpressureThreshold(rttMs: Double) -> Int {
 
 class ScreenCapture: NSObject {
     let tcpServer: TCPServer
-    let wsServer: WebSocketServer
     let ciContext: CIContext
     let targetDisplayID: CGDirectDisplayID
     
@@ -93,9 +92,8 @@ class ScreenCapture: NSObject {
     let expectedWidth: Int
     let expectedHeight: Int
 
-    init(tcpServer: TCPServer, wsServer: WebSocketServer, targetDisplayID: CGDirectDisplayID, width: Int, height: Int) {
+    init(tcpServer: TCPServer, targetDisplayID: CGDirectDisplayID, width: Int, height: Int) {
         self.tcpServer = tcpServer
-        self.wsServer = wsServer
         self.targetDisplayID = targetDisplayID
         self.expectedWidth = width
         self.expectedHeight = height
@@ -302,8 +300,6 @@ class ScreenCapture: NSObject {
             processedBuffer = pbUnmanaged?.takeRetainedValue()
         }
         let t2 = CACurrentMediaTime()
-        
-        IOSurfaceUnlock(surface, .readOnly, nil)
 
         guard let pixelBuffer = processedBuffer, let session = vtSession else {
             frameCount += 1
@@ -328,17 +324,7 @@ class ScreenCapture: NSObject {
 
         let t3 = CACurrentMediaTime()
 
-        if wsServer.hasClients {
-            let ciImage = CIImage(ioSurface: iosurfaceObj)
-            let grayImage = ciImage.applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 0.0])
-            if let jpegData = ciContext.jpegRepresentation(
-                of: grayImage,
-                colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!,
-                options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: JPEG_QUALITY]
-            ) {
-                wsServer.broadcast(jpegData)
-            }
-        }
+        IOSurfaceUnlock(surface, .readOnly, nil)
 
         frameCount += 1
         statFrames += 1
