@@ -4,7 +4,6 @@
 //   daylight-mirror start              — Start mirroring (keeps process alive)
 //   daylight-mirror stop               — Stop the running mirror instance
 //   daylight-mirror status             — Print current state (machine-readable key=value pairs)
-//   daylight-mirror reconnect          — Re-establish ADB tunnel and relaunch Android app
 //   daylight-mirror brightness [0-255] — Get or set Daylight brightness
 //   daylight-mirror warmth [0-255]     — Get or set Daylight warmth (amber rate)
 //   daylight-mirror backlight [on|off|toggle] — Get or toggle backlight
@@ -16,7 +15,6 @@
 // connect to this socket, send a text command, and receive a response.
 //
 // Ctrl+C (SIGINT) or `daylight-mirror stop` shuts down gracefully.
-// SIGUSR1 triggers an ADB reconnect without restarting.
 //
 // A PID file at /tmp/daylight-mirror.pid tracks the running CLI instance.
 // A stats file at /tmp/daylight-mirror.status is updated every 5 seconds.
@@ -225,15 +223,6 @@ func commandStart() {
     let sigtermSource = installShutdownSource(for: SIGTERM)
     _ = (sigintSource, sigtermSource) // retain
 
-    // SIGUSR1 triggers ADB reconnect without restart
-    signal(SIGUSR1, SIG_IGN)
-    let sigusr1Source = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
-    sigusr1Source.setEventHandler {
-        print("\n[SIGUSR1] Reconnecting ADB...")
-        engine.reconnect()
-    }
-    sigusr1Source.resume()
-
     // Start the engine (which also starts the control socket)
     Task { @MainActor in
         await engine.start()
@@ -341,28 +330,6 @@ func commandStatus() {
         print("status=starting")
         print("pid=\(pid)")
     }
-    exit(0)
-}
-
-/// `daylight-mirror reconnect` — reconnect ADB. Tries socket first, falls back to SIGUSR1.
-func commandReconnect() {
-    // Try socket first
-    if controlSocketExists() {
-        if let response = sendControlCommand("RECONNECT") {
-            print(response)
-            exit(response.hasPrefix("OK") ? 0 : 1)
-        }
-    }
-
-    // Fall back to SIGUSR1 for CLI daemon
-    guard let pid = readRunningPID() else {
-        print("ERROR: Daylight Mirror is not running.")
-        print("Start it first with: daylight-mirror start")
-        exit(1)
-    }
-    print("Sending reconnect signal to PID \(pid)...")
-    kill(pid, SIGUSR1)
-    print("Reconnect triggered.")
     exit(0)
 }
 
@@ -519,7 +486,6 @@ func printUsage() {
     print("  start                    Start mirroring (creates virtual display, capture, servers, ADB)")
     print("  stop                     Stop the running mirror instance")
     print("  status                   Print current state (machine-readable key=value pairs)")
-    print("  reconnect                Re-establish ADB reverse tunnel and relaunch Android app")
     print("  brightness [0-255]       Get or set Daylight brightness")
     print("  warmth [0-255]           Get or set Daylight warmth (amber rate)")
     print("  backlight [on|off|toggle] Get or toggle backlight")
@@ -546,8 +512,6 @@ case "stop":
     commandStop()
 case "status":
     commandStatus()
-case "reconnect":
-    commandReconnect()
 case "brightness":
     commandBrightness()
 case "warmth":

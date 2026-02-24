@@ -75,21 +75,20 @@ Verify with `adb devices` — you should see your device listed.
 
 ### First run — macOS permissions
 
-On first launch, macOS needs two permissions. The app will guide you through this:
+On first launch, macOS needs Screen Recording permission. The app will guide you through this:
 
 1. **Screen Recording** — required to capture your display. The app will open System Settings automatically. Toggle "Daylight Mirror" on, then quit and reopen the app.
-2. **Accessibility** — required for keyboard shortcuts (`Ctrl+F8`, etc.). Same flow: toggle on in System Settings, then reopen.
 
 ## Usage
 
 1. Open **Daylight Mirror** from Spotlight
 2. Pick a resolution (Cozy, Comfortable, Balanced, or Sharp)
-3. Click **Start Mirror** (or press `Ctrl+F8`)
+3. Click **Start Mirror**
 4. On the Daylight, open the **Daylight Mirror** app
 
 That's it. Your Mac switches to 4:3, and the Daylight lights up.
 
-![Menu bar popover — live stats, brightness and warmth sliders, backlight toggle](docs/images/2-menu-bar.jpg)
+![Menu bar popover — live stats, brightness and warmth sliders](docs/images/2-menu-bar.jpg)
 
 ### Resolution
 
@@ -102,18 +101,7 @@ Four 4:3 presets, selectable before or during mirroring:
 | Balanced | 1280x960 | Good balance of size and sharpness |
 | Sharp | 1600x1200 | Maximum sharpness, smallest UI |
 
-### Keyboard shortcuts
-
-All shortcuts use `Ctrl` + function keys:
-
-| Shortcut | Action |
-|----------|--------|
-| `Ctrl+F8` | Start / stop mirroring |
-| `Ctrl+F1` / `Ctrl+F2` | Brightness down / up |
-| `Ctrl+F10` | Toggle backlight |
-| `Ctrl+F11` / `Ctrl+F12` | Warmth down / up |
-
-The menu bar also has brightness and warmth sliders, a backlight toggle, resolution picker, and live connection stats.
+The menu bar has brightness and warmth sliders, a resolution picker, and live connection stats.
 
 Click **Stop Mirror** or quit the app — your Mac reverts to normal instantly.
 
@@ -125,7 +113,6 @@ Every feature in the menu bar app is available from the command line. The CLI ta
 daylight-mirror start                # start mirroring (tells GUI app, or spawns daemon)
 daylight-mirror stop                 # stop mirroring
 daylight-mirror status               # current state (machine-readable)
-daylight-mirror reconnect            # re-establish ADB tunnel
 
 daylight-mirror brightness           # get current brightness
 daylight-mirror brightness 200       # set brightness (0-255)

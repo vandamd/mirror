@@ -52,14 +52,9 @@ public class MirrorEngine: ObservableObject {
     private var compositorPacer: CompositorPacer?
     private var controlSocket: ControlSocket?
     private var usbMonitor: USBDeviceMonitor?
-    private var savedMacBrightness: Float?   // Mac brightness before auto-dim
     /// When true, auto-start/stop mirroring based on USB device state.
     @Published public var autoMirrorEnabled: Bool = true {
         didSet { UserDefaults.standard.set(autoMirrorEnabled, forKey: "autoMirrorEnabled") }
-    }
-    /// When true, auto-dim the Mac's built-in display when a Daylight client connects.
-    @Published public var autoDimMac: Bool = true {
-        didSet { UserDefaults.standard.set(autoDimMac, forKey: "autoDimMac") }
     }
 
     public init() {
@@ -67,9 +62,6 @@ public class MirrorEngine: ObservableObject {
         self.resolution = DisplayResolution(rawValue: saved) ?? .sharp
         if UserDefaults.standard.object(forKey: "autoMirrorEnabled") != nil {
             self.autoMirrorEnabled = UserDefaults.standard.bool(forKey: "autoMirrorEnabled")
-        }
-        if UserDefaults.standard.object(forKey: "autoDimMac") != nil {
-            self.autoDimMac = UserDefaults.standard.bool(forKey: "autoDimMac")
         }
         NSLog("[MirrorEngine] init, resolution: %@",
               resolution.rawValue)
@@ -141,52 +133,6 @@ public class MirrorEngine: ObservableObject {
         }
     }
 
-    private var globalKeyMonitor: Any?
-    private var globalSystemMonitor: Any?
-
-    /// Call once after init, from the main thread, to register Ctrl+F8 global hotkey.
-    public func setupGlobalShortcut() {
-        NSLog("[Global] Setting up Ctrl+F8 hotkey via NSEvent monitors...")
-
-        // Monitor regular key events (Ctrl+F8 = keyCode 100)
-        globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            if event.modifierFlags.contains(.control) && event.keyCode == 100 {
-                NSLog("[Global] Ctrl+F8 pressed — toggling")
-                self?.toggleMirror()
-            }
-        }
-
-        // Monitor system-defined events (F8 as media key = play/pause)
-        globalSystemMonitor = NSEvent.addGlobalMonitorForEvents(matching: .systemDefined) { [weak self] event in
-            guard event.subtype.rawValue == 8 else { return }
-            let data1 = event.data1
-            let keyCode = (data1 & 0xFFFF0000) >> 16
-            let keyDown = ((data1 & 0xFF00) >> 8) == 0xA
-            let ctrl = event.modifierFlags.contains(.control)
-            if keyDown && ctrl && keyCode == 16 {
-                NSLog("[Global] Ctrl+F8 media key — toggling")
-                self?.toggleMirror()
-            }
-        }
-
-        NSLog("[Global] Ctrl+F8 hotkey registered (key=%@, system=%@)",
-              globalKeyMonitor != nil ? "yes" : "no",
-              globalSystemMonitor != nil ? "yes" : "no")
-    }
-
-    /// Toggle mirror on/off from keyboard shortcut
-    private func toggleMirror() {
-        DispatchQueue.main.async {
-            if self.status == .running {
-                self.stop()
-            } else if self.status == .idle || self.status == .waitingForDevice {
-                Task { @MainActor in
-                    await self.start()
-                }
-            }
-        }
-    }
-
     // MARK: - Permission & Device Checks
 
     /// Check if Screen Recording permission is granted.
@@ -197,17 +143,6 @@ public class MirrorEngine: ObservableObject {
     /// Prompt the user for Screen Recording permission (opens System Settings).
     public static func requestScreenRecordingPermission() {
         CGRequestScreenCaptureAccess()
-    }
-
-    /// Check if Accessibility permission is granted (needed for global keyboard shortcuts).
-    public static func hasAccessibilityPermission() -> Bool {
-        return AXIsProcessTrusted()
-    }
-
-    /// Prompt for Accessibility permission with the system dialog.
-    public static func requestAccessibilityPermission() {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
-        AXIsProcessTrustedWithOptions(options)
     }
 
     /// Check if adb is installed.
@@ -228,7 +163,7 @@ public class MirrorEngine: ObservableObject {
 
     /// Whether all required permissions are granted.
     public static var allPermissionsGranted: Bool {
-        hasScreenRecordingPermission() && hasAccessibilityPermission()
+        hasScreenRecordingPermission()
     }
 
     @MainActor
@@ -272,25 +207,7 @@ public class MirrorEngine: ObservableObject {
             tcp.frameHeight = UInt16(h)
             tcp.onClientCountChanged = { [weak self] count in
                 DispatchQueue.main.async {
-                    let wasConnected = (self?.clientCount ?? 0) > 0
                     self?.clientCount = count
-
-                    // Auto-dim Mac when Daylight connects, restore when it disconnects
-                    if self?.autoDimMac == true {
-                        if count > 0 && !wasConnected {
-                            if let current = MacBrightness.get() {
-                                self?.savedMacBrightness = current
-                                MacBrightness.set(0)
-                                print("[Mac] Auto-dimmed (was \(current))")
-                            }
-                        } else if count == 0 && wasConnected {
-                            if let saved = self?.savedMacBrightness {
-                                MacBrightness.set(saved)
-                                self?.savedMacBrightness = nil
-                                print("[Mac] Brightness restored to \(saved)")
-                            }
-                        }
-                    }
                 }
             }
             tcp.onLatencyStats = { [weak self] stats in
@@ -354,7 +271,7 @@ public class MirrorEngine: ObservableObject {
             return
         }
 
-        // 6. Display controller (keyboard shortcuts)
+        // 6. Display controller
         let dc = DisplayController(tcpServer: tcpServer!)
         dc.onBrightnessChanged = { [weak self] val in
             DispatchQueue.main.async { self?.brightness = val }
@@ -440,13 +357,6 @@ public class MirrorEngine: ObservableObject {
         guard status == .running || status == .waitingForDevice else { return }
         if status == .waitingForDevice { status = .idle; return }
         DispatchQueue.main.async { self.status = .stopping }
-
-        // Restore Mac brightness before tearing down (even if toggle was turned off mid-session)
-        if let saved = savedMacBrightness {
-            MacBrightness.set(saved)
-            savedMacBrightness = nil
-            print("[Mac] Brightness restored to \(saved)")
-        }
 
         Task {
             // Stop in reverse order (control socket stays alive — it's engine-lifetime)

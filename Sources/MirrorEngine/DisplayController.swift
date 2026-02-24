@@ -1,11 +1,6 @@
-// DisplayController.swift — Keyboard controls for Daylight hardware.
-//
-// Intercepts Ctrl+function key events for Daylight display control:
-//   Ctrl+F1/F2:   Brightness down/up
-//   Ctrl+F10:     Toggle backlight on/off
-//   Ctrl+F11/F12: Warmth (amber) down/up
+// DisplayController.swift — Daylight display controls.
 
-import AppKit
+import Foundation
 
 class DisplayController {
     let tcpServer: TCPServer
@@ -13,8 +8,6 @@ class DisplayController {
     var currentWarmth: Int = 128
     var backlightOn: Bool = true
     var savedBrightness: Int = 128
-    var keyMonitor: Any?
-    var systemMonitor: Any?
 
     var onBrightnessChanged: ((Int) -> Void)?
     var onWarmthChanged: ((Int) -> Void)?
@@ -43,42 +36,9 @@ class DisplayController {
                 print("[Display] Daylight warmth: \(self.currentWarmth)/255")
             }
         }
-
-        // NSEvent monitors for keyboard shortcuts (no TCC code-signing issues)
-        keyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard event.modifierFlags.contains(.control), let self = self else { return }
-            switch event.keyCode {
-            case 122: self.adjustBrightness(by: -BRIGHTNESS_STEP)  // Ctrl+F1
-            case 120: self.adjustBrightness(by: BRIGHTNESS_STEP)   // Ctrl+F2
-            case 109: self.toggleBacklight()                       // Ctrl+F10
-            case 103: self.adjustWarmth(by: -WARMTH_STEP)          // Ctrl+F11
-            case 111: self.adjustWarmth(by: WARMTH_STEP)           // Ctrl+F12
-            default: break
-            }
-        }
-
-        systemMonitor = NSEvent.addGlobalMonitorForEvents(matching: .systemDefined) { [weak self] event in
-            guard event.subtype.rawValue == 8, let self = self else { return }
-            let data1 = event.data1
-            let keyCode = (data1 & 0xFFFF0000) >> 16
-            let keyDown = ((data1 & 0xFF00) >> 8) == 0xA
-            guard keyDown && event.modifierFlags.contains(.control) else { return }
-            switch keyCode {
-            case 3: self.adjustBrightness(by: -BRIGHTNESS_STEP)  // Ctrl+F1 media
-            case 2: self.adjustBrightness(by: BRIGHTNESS_STEP)   // Ctrl+F2 media
-            case 7: self.toggleBacklight()                       // Ctrl+F10 media
-            case 1: self.adjustWarmth(by: -WARMTH_STEP)          // Ctrl+F11 media
-            case 0: self.adjustWarmth(by: WARMTH_STEP)           // Ctrl+F12 media
-            default: break
-            }
-        }
-
-        print("[Display] Ctrl+F1/F2: brightness | Ctrl+F10: backlight toggle | Ctrl+F11/F12: warmth")
     }
 
     func stop() {
-        if let m = keyMonitor { NSEvent.removeMonitor(m); keyMonitor = nil }
-        if let m = systemMonitor { NSEvent.removeMonitor(m); systemMonitor = nil }
     }
 
     /// Step brightness using the same quadratic curve as the slider.

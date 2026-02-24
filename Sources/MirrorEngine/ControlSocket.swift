@@ -200,14 +200,6 @@ public class ControlSocket {
             }
             return "OK \(s)"
 
-        case "RECONNECT":
-            if engine.status == .running {
-                engine.reconnect()
-                return "OK reconnecting"
-            } else {
-                return "ERR not running"
-            }
-
         case "FONTSMOOTHING":
             if let arg = parts.dropFirst().first?.lowercased() {
                 switch arg {

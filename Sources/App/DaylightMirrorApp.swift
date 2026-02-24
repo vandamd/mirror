@@ -1,27 +1,350 @@
 // DaylightMirrorApp.swift — Menu bar app for Daylight Mirror.
 //
 // On first launch (or missing permissions), shows a setup wizard window that guides
-// the user through granting Screen Recording + Accessibility permissions and connecting
-// their Daylight DC-1. Once setup is complete, the app lives entirely in the menu bar.
-// Ctrl+F8 toggles mirroring globally.
+// the user through granting Screen Recording permission and connecting their
+// Daylight DC-1. Once setup is complete, the app lives entirely in the menu bar.
 
 import SwiftUI
+import AppKit
 import MirrorEngine
 
 // MARK: - App Delegate
 
-/// Owns the MirrorEngine, manages the setup window, and registers global hotkeys.
-class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
+/// Owns the MirrorEngine, setup window, and AppKit status menu.
+class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject, NSMenuDelegate {
     let engine = MirrorEngine()
     var setupWindow: NSWindow?
 
+    private var statusItem: NSStatusItem?
+    private var menuRefreshTimer: DispatchSourceTimer?
+    private var openMenu: NSMenu?
+    private var currentMenuLayout: MenuLayout?
+
+    private struct MenuLayout: Equatable {
+        let showsRunningControls: Bool
+        let showsSetupItem: Bool
+    }
+
+    private enum MenuTag {
+        static let primary = 1001
+        static let status = 1002
+        static let fps = 1003
+        static let resolution = 1004
+        static let autoReconnect = 1005
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSLog("[AppDelegate] didFinishLaunching")
-        engine.setupGlobalShortcut()
+        setupStatusItem()
 
         // Show setup window if first run or permissions missing
         if !MirrorEngine.setupCompleted || !MirrorEngine.allPermissionsGranted {
             showSetupWindow()
+        }
+    }
+
+    private func setupStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        self.statusItem = item
+
+        guard let button = item.button else { return }
+        let icon = NSImage(systemSymbolName: "display", accessibilityDescription: "Daylight Mirror")
+        icon?.isTemplate = true
+        button.image = icon
+        button.action = #selector(statusItemClicked)
+        button.target = self
+        button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+    }
+
+    @objc private func statusItemClicked() {
+        guard let item = statusItem else { return }
+        if openMenu == nil {
+            let menu = NSMenu()
+            menu.delegate = self
+            openMenu = menu
+        }
+        refreshOpenMenu()
+        item.menu = openMenu
+        item.button?.performClick(nil)
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        menuRefreshTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + .milliseconds(500), repeating: .milliseconds(600))
+        timer.setEventHandler { [weak self] in
+            self?.refreshOpenMenu()
+        }
+        timer.resume()
+        menuRefreshTimer = timer
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        menuRefreshTimer?.cancel()
+        menuRefreshTimer = nil
+        statusItem?.menu = nil
+        currentMenuLayout = nil
+    }
+
+    private func refreshOpenMenu() {
+        guard let menu = openMenu else { return }
+        let layout = currentMenuLayoutSignature()
+        if menu.items.isEmpty || layout != currentMenuLayout {
+            menu.removeAllItems()
+            buildMenu(into: menu)
+            currentMenuLayout = layout
+        } else {
+            updateMenuDynamicItems(in: menu)
+        }
+    }
+
+    private func buildMenu(into menu: NSMenu) {
+        let primaryItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        primaryItem.tag = MenuTag.primary
+        configurePrimaryMenuItem(primaryItem)
+        menu.addItem(primaryItem)
+
+        if engine.status == .running {
+            let restartItem = NSMenuItem(title: "Restart", action: #selector(restartMirror), keyEquivalent: "")
+            restartItem.target = self
+            restartItem.image = NSImage(systemSymbolName: "restart", accessibilityDescription: "Restart")
+            menu.addItem(restartItem)
+        }
+
+        let statusItem = NSMenuItem(title: statusMenuText(), action: nil, keyEquivalent: "")
+        statusItem.tag = MenuTag.status
+        statusItem.image = NSImage(systemSymbolName: "info.circle", accessibilityDescription: "Status")
+        statusItem.isEnabled = false
+        menu.addItem(statusItem)
+
+        let fpsItem = NSMenuItem(title: fpsMenuText(), action: nil, keyEquivalent: "")
+        fpsItem.tag = MenuTag.fps
+        fpsItem.image = NSImage(systemSymbolName: "speedometer", accessibilityDescription: "FPS")
+        fpsItem.isEnabled = false
+        menu.addItem(fpsItem)
+
+        menu.addItem(.separator())
+
+        let resolutionItem = NSMenuItem(title: "Resolution", action: nil, keyEquivalent: "")
+        resolutionItem.tag = MenuTag.resolution
+        resolutionItem.image = NSImage(systemSymbolName: "rectangle.resize", accessibilityDescription: "Resolution")
+        let resolutionSubmenu = NSMenu(title: "Resolution")
+        for res in DisplayResolution.allCases {
+            let item = NSMenuItem(title: "\(res.label) (\(res.rawValue))", action: #selector(selectResolution(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = res
+            item.state = (engine.resolution == res) ? .on : .off
+            resolutionSubmenu.addItem(item)
+        }
+        resolutionItem.submenu = resolutionSubmenu
+        menu.addItem(resolutionItem)
+
+        if engine.status == .running {
+            menu.addItem(.separator())
+            menu.addItem(makeBrightnessSliderItem())
+            menu.addItem(makeWarmthSliderItem())
+        }
+
+        if !MirrorEngine.allPermissionsGranted {
+            let setupItem = NSMenuItem(title: "Open Setup…", action: #selector(openSetup), keyEquivalent: "")
+            setupItem.target = self
+            setupItem.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: "Open Setup")
+            menu.addItem(setupItem)
+        }
+
+        menu.addItem(.separator())
+
+        let autoReconnectItem = NSMenuItem(title: "Start mirroring on USB connect", action: #selector(toggleAutoReconnect), keyEquivalent: "")
+        autoReconnectItem.tag = MenuTag.autoReconnect
+        autoReconnectItem.target = self
+        autoReconnectItem.image = NSImage(systemSymbolName: "cable.connector", accessibilityDescription: "Auto-reconnect on USB")
+        autoReconnectItem.state = engine.autoMirrorEnabled ? .on : .off
+        menu.addItem(autoReconnectItem)
+
+        menu.addItem(.separator())
+
+        let quitItem = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q")
+        quitItem.target = self
+        quitItem.image = NSImage(systemSymbolName: "power", accessibilityDescription: "Quit")
+        menu.addItem(quitItem)
+
+    }
+
+    private func currentMenuLayoutSignature() -> MenuLayout {
+        MenuLayout(
+            showsRunningControls: engine.status == .running,
+            showsSetupItem: !MirrorEngine.allPermissionsGranted
+        )
+    }
+
+    private func configurePrimaryMenuItem(_ item: NSMenuItem) {
+        let primaryIsStop = (engine.status == .running || engine.status == .starting)
+        item.title = primaryIsStop ? "Stop Mirror" : "Start Mirror"
+        item.action = primaryIsStop ? #selector(stopMirror) : #selector(startMirror)
+        item.target = self
+        item.image = NSImage(
+            systemSymbolName: primaryIsStop ? "stop.fill" : "play.fill",
+            accessibilityDescription: primaryIsStop ? "Stop Mirror" : "Start Mirror"
+        )
+        item.isEnabled = (engine.status != .stopping)
+    }
+
+    private func statusMenuText() -> String {
+        if case .error(let msg) = engine.status {
+            return "Error: \(msg)"
+        } else if engine.status == .starting {
+            return "Starting..."
+        } else if engine.status == .stopping {
+            return "Stopping..."
+        } else if engine.status == .running {
+            return engine.clientCount > 0 ? "Daylight connected" : "Waiting for client..."
+        } else {
+            return engine.deviceDetected ? "DC-1 detected via USB" : "No device connected"
+        }
+    }
+
+    private func fpsMenuText() -> String {
+        if engine.status == .running {
+            return String(format: "FPS: %.0f", engine.fps)
+        }
+        return "FPS: --"
+    }
+
+    private func updateMenuDynamicItems(in menu: NSMenu) {
+        if let primaryItem = menu.item(withTag: MenuTag.primary) {
+            configurePrimaryMenuItem(primaryItem)
+        }
+
+        if let statusItem = menu.item(withTag: MenuTag.status) {
+            statusItem.title = statusMenuText()
+        }
+
+        if let fpsItem = menu.item(withTag: MenuTag.fps) {
+            fpsItem.title = fpsMenuText()
+        }
+
+        if let resolutionItem = menu.item(withTag: MenuTag.resolution),
+           let resolutionSubmenu = resolutionItem.submenu {
+            for item in resolutionSubmenu.items {
+                guard let res = item.representedObject as? DisplayResolution else { continue }
+                item.state = (engine.resolution == res) ? .on : .off
+            }
+        }
+
+        if let autoReconnectItem = menu.item(withTag: MenuTag.autoReconnect) {
+            autoReconnectItem.state = engine.autoMirrorEnabled ? .on : .off
+        }
+    }
+
+    private func makeBrightnessSliderItem() -> NSMenuItem {
+        let item = NSMenuItem()
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 285, height: 30))
+
+        let iconView = NSImageView()
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        iconView.image = NSImage(systemSymbolName: "sun.max", accessibilityDescription: "Brightness")
+        iconView.contentTintColor = .labelColor
+        container.addSubview(iconView)
+
+        let sliderPos = engine.brightness == 0 ? 0.0 : sqrt(Double(engine.brightness) / 255.0)
+        let slider = NSSlider(value: sliderPos, minValue: 0, maxValue: 1, target: self, action: #selector(brightnessSliderChanged(_:)))
+        slider.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(slider)
+
+        NSLayoutConstraint.activate([
+            iconView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 22),
+            iconView.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: 16),
+            iconView.heightAnchor.constraint(equalToConstant: 16),
+
+            slider.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 8),
+            slider.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
+            slider.centerYAnchor.constraint(equalTo: container.centerYAnchor)
+        ])
+
+        item.view = container
+        return item
+    }
+
+    private func makeWarmthSliderItem() -> NSMenuItem {
+        let item = NSMenuItem()
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 285, height: 30))
+
+        let iconView = NSImageView()
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        iconView.image = NSImage(systemSymbolName: "flame", accessibilityDescription: "Warmth")
+        iconView.contentTintColor = .labelColor
+        container.addSubview(iconView)
+
+        let slider = NSSlider(value: Double(engine.warmth), minValue: 0, maxValue: 255, target: self, action: #selector(warmthSliderChanged(_:)))
+        slider.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(slider)
+
+        NSLayoutConstraint.activate([
+            iconView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 22),
+            iconView.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: 16),
+            iconView.heightAnchor.constraint(equalToConstant: 16),
+
+            slider.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 8),
+            slider.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
+            slider.centerYAnchor.constraint(equalTo: container.centerYAnchor)
+        ])
+
+        item.view = container
+        return item
+    }
+
+    @objc private func startMirror() {
+        if !MirrorEngine.hasScreenRecordingPermission() {
+            showSetupWindow()
+            return
+        }
+        Task { await engine.start() }
+    }
+
+    @objc private func openSetup() {
+        showSetupWindow()
+    }
+
+    @objc private func stopMirror() {
+        engine.stop()
+    }
+
+    @objc private func restartMirror() {
+        engine.stop()
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(0.5))
+            await engine.start()
+        }
+    }
+
+    @objc private func selectResolution(_ sender: NSMenuItem) {
+        guard let newRes = sender.representedObject as? DisplayResolution else { return }
+        guard engine.resolution != newRes else { return }
+        engine.resolution = newRes
+        if engine.status == .running {
+            restartMirror()
+        }
+    }
+
+    @objc private func toggleAutoReconnect(_ sender: NSMenuItem) {
+        engine.autoMirrorEnabled.toggle()
+        sender.state = engine.autoMirrorEnabled ? .on : .off
+    }
+
+    @objc private func brightnessSliderChanged(_ sender: NSSlider) {
+        engine.setBrightness(MirrorEngine.brightnessFromSliderPos(sender.doubleValue))
+    }
+
+    @objc private func warmthSliderChanged(_ sender: NSSlider) {
+        engine.setWarmth(Int(sender.doubleValue.rounded()))
+    }
+
+    @objc func quit() {
+        engine.stop()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            NSApp.terminate(nil)
         }
     }
 
@@ -64,36 +387,11 @@ struct DaylightMirrorApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
 
     init() {
-        // Start as accessory (menu bar only) — setup window will switch to regular if needed
         NSApplication.shared.setActivationPolicy(.accessory)
     }
 
     var body: some Scene {
-        MenuBarExtra {
-            MirrorMenuView(engine: delegate.engine, showSetup: { delegate.showSetupWindow() })
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "display")
-                if let color = menuBarDotColor(delegate.engine.status) {
-                    Circle()
-                        .fill(color)
-                        .frame(width: 6, height: 6)
-                }
-            }
-        }
-        .menuBarExtraStyle(.window)
-    }
-
-    /// Maps engine status to a menu bar dot color.
-    /// Returns nil for idle (no dot shown).
-    func menuBarDotColor(_ status: MirrorStatus) -> Color? {
-        switch status {
-        case .running:                      return .green
-        case .waitingForDevice,
-             .starting, .stopping:          return .orange
-        case .error:                        return .red
-        case .idle:                         return nil
-        }
+        Settings { EmptyView() }
     }
 }
 
@@ -111,12 +409,10 @@ struct SetupView: View {
 
     @State private var step: SetupStep = .welcome
     @State private var hasScreenRecording = MirrorEngine.hasScreenRecordingPermission()
-    @State private var hasAccessibility = MirrorEngine.hasAccessibilityPermission()
     @State private var pollTimer: Timer?
 
     var body: some View {
         VStack(spacing: 0) {
-            // Progress dots
             HStack(spacing: 8) {
                 ForEach(SetupStep.allCases, id: \.rawValue) { s in
                     Circle()
@@ -127,7 +423,6 @@ struct SetupView: View {
             .padding(.top, 20)
             .padding(.bottom, 16)
 
-            // Step content
             Group {
                 switch step {
                 case .welcome:
@@ -143,8 +438,6 @@ struct SetupView: View {
         .frame(width: 480, height: 520)
         .onDisappear { pollTimer?.invalidate() }
     }
-
-    // MARK: Step 1 — Welcome
 
     var welcomeStep: some View {
         VStack(spacing: 24) {
@@ -165,7 +458,7 @@ struct SetupView: View {
             VStack(alignment: .leading, spacing: 12) {
                 featureRow("bolt.fill", "60 FPS, under 11ms latency")
                 featureRow("eye", "Lossless greyscale — no compression artifacts")
-                featureRow("keyboard", "Shortcuts for brightness, warmth, and more")
+                featureRow("slider.horizontal.3", "Brightness and warmth controls in the menu")
             }
             .padding(.horizontal, 60)
             .padding(.top, 8)
@@ -192,8 +485,6 @@ struct SetupView: View {
         }
     }
 
-    // MARK: Step 2 — Permissions
-
     var permissionsStep: some View {
         VStack(spacing: 20) {
             Spacer()
@@ -201,7 +492,7 @@ struct SetupView: View {
             Text("macOS Permissions")
                 .font(.title2.weight(.medium))
 
-            Text("Daylight Mirror needs two permissions to work.\nGrant each one, then come back here.")
+            Text("Daylight Mirror needs Screen Recording permission to work.\nGrant it, then come back here.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -217,26 +508,15 @@ struct SetupView: View {
                         startPermissionPolling()
                     }
                 )
-
-                permissionCard(
-                    granted: hasAccessibility,
-                    icon: "keyboard",
-                    title: "Accessibility",
-                    description: "Enables Ctrl+F key shortcuts for brightness and warmth",
-                    action: {
-                        MirrorEngine.requestAccessibilityPermission()
-                        startPermissionPolling()
-                    }
-                )
             }
             .padding(.horizontal, 40)
 
-            if hasScreenRecording && hasAccessibility {
+            if hasScreenRecording {
                 Text("All permissions granted")
                     .font(.callout.weight(.medium))
                     .foregroundStyle(.green)
             } else {
-                Text("After granting a permission, you may need to\nquit and reopen the app for it to take effect.")
+                Text("After granting permission, you may need to\nquit and reopen the app for it to take effect.")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
                     .multilineTextAlignment(.center)
@@ -292,14 +572,11 @@ struct SetupView: View {
         pollTimer?.invalidate()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
             hasScreenRecording = MirrorEngine.hasScreenRecordingPermission()
-            hasAccessibility = MirrorEngine.hasAccessibilityPermission()
-            if hasScreenRecording && hasAccessibility {
+            if hasScreenRecording {
                 pollTimer?.invalidate()
             }
         }
     }
-
-    // MARK: Step 3 — Ready
 
     var readyStep: some View {
         VStack(spacing: 24) {
@@ -314,9 +591,9 @@ struct SetupView: View {
 
             VStack(alignment: .leading, spacing: 12) {
                 howItWorksRow("1", "Connect your Daylight DC-1 via USB-C")
-                howItWorksRow("2", "Click Start Mirror in the menu bar (or press Ctrl+F8)")
+                howItWorksRow("2", "Click Start Mirror in the menu bar")
                 howItWorksRow("3", "Your Mac creates a virtual 4:3 display and starts streaming")
-                howItWorksRow("4", "The Daylight app launches automatically — your Mac dims")
+                howItWorksRow("4", "The Daylight app launches automatically")
             }
             .padding(.horizontal, 50)
 
@@ -332,25 +609,6 @@ struct SetupView: View {
                 Text("Auto-reconnect detects your Daylight when plugged in")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
-
-                HStack(spacing: 6) {
-                    Text("Ctrl")
-                        .font(.system(size: 11, weight: .medium, design: .rounded))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(RoundedRectangle(cornerRadius: 4).fill(.quaternary))
-                    Text("+")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                    Text("F8")
-                        .font(.system(size: 11, weight: .medium, design: .rounded))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(RoundedRectangle(cornerRadius: 4).fill(.quaternary))
-                    Text("toggles mirroring anytime")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
             }
 
             Spacer()
@@ -377,491 +635,5 @@ struct SetupView: View {
             Text(text)
                 .font(.callout)
         }
-    }
-}
-
-// MARK: - Menu Bar View
-
-struct MirrorMenuView: View {
-    @ObservedObject var engine: MirrorEngine
-    var showSetup: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            // Header
-            HStack {
-                Text("Daylight Mirror")
-                    .font(.headline)
-                Spacer()
-                statusBadge
-            }
-
-            // Update banner
-            if let version = engine.updateVersion, let urlStr = engine.updateURL,
-               let url = URL(string: urlStr) {
-                Link(destination: url) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "arrow.down.circle")
-                        Text("v\(version) available")
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.blue)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                }
-            }
-
-            Divider()
-
-            // Permissions warning if missing
-            if !MirrorEngine.allPermissionsGranted {
-                Button(action: showSetup) {
-                    Label("Permissions needed — open setup", systemImage: "exclamationmark.triangle")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
-                .buttonStyle(.plain)
-
-                Divider()
-            }
-
-            switch engine.status {
-            case .running:
-                runningView
-            case .waitingForDevice:
-                waitingForDeviceView
-            case .starting:
-                startingView
-            case .stopping:
-                HStack {
-                    ProgressView().controlSize(.small)
-                    Text("Stopping...").font(.caption).foregroundStyle(.secondary)
-                }
-            case .error(let msg):
-                errorView(msg)
-            case .idle:
-                idleView
-            }
-
-            // Keyboard shortcuts reference
-            Divider()
-
-            VStack(spacing: 4) {
-                Text("Ctrl + Function Keys")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.tertiary)
-                if engine.status == .running {
-                    HStack(spacing: 6) {
-                        shortcutPill("F8", label: "Mirror")
-                        Spacer()
-                        shortcutGroup("F1", "F2", label: "Brightness")
-                        Spacer()
-                        shortcutPill("F10", label: "Backlight")
-                        Spacer()
-                        shortcutGroup("F11", "F12", label: "Warmth")
-                    }
-                } else {
-                    HStack {
-                        shortcutPill("F8", label: "Start Mirror")
-                    }
-                }
-            }
-            .padding(.vertical, 2)
-
-            Divider()
-
-            HStack {
-                Button("Quit") {
-                    engine.stop()
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        NSApp.terminate(nil)
-                    }
-                }
-                .font(.caption)
-                Spacer()
-                Link("Feedback", destination: URL(string: "https://github.com/welfvh/daylight-mirror/issues")!)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Link("Support", destination: URL(string: "mailto:w+mirror@welf.co")!)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Link("About", destination: URL(string: "https://welf.ai/mirror")!)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .padding()
-        .frame(width: 280)
-    }
-
-    // MARK: - Status Badge
-
-    @ViewBuilder
-    var statusBadge: some View {
-        HStack(spacing: 4) {
-            Circle()
-                .fill(statusColor)
-                .frame(width: 8, height: 8)
-            Text(statusText)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    var statusColor: Color {
-        switch engine.status {
-        case .idle: return .gray
-        case .waitingForDevice: return .orange
-        case .starting, .stopping: return .orange
-        case .running: return .green
-        case .error: return .red
-        }
-    }
-
-    var statusText: String {
-        switch engine.status {
-        case .idle: return "Idle"
-        case .waitingForDevice: return "Waiting for DC-1"
-        case .starting: return "Starting"
-        case .running: return "Running"
-        case .stopping: return "Stopping"
-        case .error: return "Error"
-        }
-    }
-
-    // MARK: - Running View
-
-    @State private var showDetailedStats = false
-
-    @ViewBuilder
-    var runningView: some View {
-        // Stats — tap to expand
-        Button(action: { withAnimation(.easeInOut(duration: 0.15)) { showDetailedStats.toggle() } }) {
-            HStack {
-                Label(String(format: "%.0f FPS", engine.fps), systemImage: "speedometer")
-                Spacer()
-                Text(String(format: "%.1f MB/s", engine.bandwidth))
-                    .foregroundStyle(.secondary)
-                Image(systemName: showDetailedStats ? "chevron.up" : "chevron.down")
-                    .font(.system(size: 8))
-                    .foregroundStyle(.tertiary)
-            }
-            .font(.caption)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-
-        if showDetailedStats {
-            VStack(spacing: 4) {
-                statsRow("Resolution", "\(engine.resolution.rawValue)\(engine.resolution.isHiDPI ? " HiDPI" : "")")
-                statsRow("Frame size", "\(engine.frameSizeKB) KB")
-                statsRow("Total frames", "\(engine.totalFrames)")
-                statsRow("Process", String(format: "%.1f ms", engine.greyMs))
-                statsRow("LZ4 compress", String(format: "%.1f ms", engine.compressMs))
-                statsRow("Frame budget", String(format: "%.0f%%", (engine.greyMs + engine.compressMs) / (1000.0 / 60.0) * 100))
-            }
-            .padding(.horizontal, 4)
-            .padding(.vertical, 4)
-            .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary.opacity(0.5)))
-        }
-
-        // Client status
-        HStack(spacing: 6) {
-            Circle()
-                .fill(engine.clientCount > 0 ? .green : .orange)
-                .frame(width: 6, height: 6)
-            Text(engine.clientCount > 0
-                 ? "Daylight connected"
-                 : engine.apkInstallStatus.isEmpty
-                    ? "Waiting for client..."
-                    : engine.apkInstallStatus)
-                .font(.caption)
-            Spacer()
-            if engine.adbConnected {
-                Label("USB", systemImage: "cable.connector")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-        }
-
-        Divider()
-
-        // Resolution (change triggers restart)
-        Picker("Resolution", selection: Binding(
-            get: { engine.resolution },
-            set: { newRes in
-                engine.resolution = newRes
-                engine.stop()
-                Task { @MainActor in
-                    try? await Task.sleep(for: .seconds(0.5))
-                    await engine.start()
-                }
-            }
-        )) {
-            ForEach(DisplayResolution.allCases) { res in
-                Text("\(res.label) (\(res.rawValue))").tag(res)
-            }
-        }
-        .pickerStyle(.menu)
-        .controlSize(.small)
-        .padding(.vertical, 2)
-
-        Divider()
-
-        // Brightness slider (quadratic curve with widened low-end zone)
-        VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Image(systemName: "sun.min")
-                    .font(.caption2)
-                Slider(
-                    value: Binding(
-                        get: {
-                            if engine.brightness == 0 { return 0 }
-                            return sqrt(Double(engine.brightness) / 255.0)
-                        },
-                        set: { pos in
-                            engine.setBrightness(MirrorEngine.brightnessFromSliderPos(pos))
-                        }
-                    ),
-                    in: 0...1
-                )
-                Image(systemName: "sun.max")
-                    .font(.caption2)
-            }
-        }
-
-        // Warmth slider
-        VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Image(systemName: "snowflake")
-                    .font(.caption2)
-                Slider(
-                    value: Binding(
-                        get: { Double(engine.warmth) },
-                        set: { engine.setWarmth(Int($0)) }
-                    ),
-                    in: 0...255
-                )
-                Image(systemName: "flame")
-                    .font(.caption2)
-            }
-        }
-
-        // Backlight toggle
-        Toggle(isOn: Binding(
-            get: { engine.backlightOn },
-            set: { _ in engine.toggleBacklight() }
-        )) {
-            Label("Backlight", systemImage: "lightbulb")
-                .font(.caption)
-        }
-        .toggleStyle(.switch)
-        .controlSize(.small)
-
-        Divider()
-
-        // Auto-reconnect toggle
-        Toggle(isOn: $engine.autoMirrorEnabled) {
-            Label("Auto-reconnect on USB", systemImage: "cable.connector")
-                .font(.caption)
-        }
-        .toggleStyle(.switch)
-        .controlSize(.small)
-
-        // Auto-dim Mac display when Daylight is connected
-        Toggle(isOn: $engine.autoDimMac) {
-            Label("Dim Mac display", systemImage: "display")
-                .font(.caption)
-        }
-        .toggleStyle(.switch)
-        .controlSize(.small)
-
-        Divider()
-
-        // Reconnect / Restart / Stop
-        HStack(spacing: 6) {
-            Button(action: { engine.reconnect() }) {
-                Text("Reconnect")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-
-            Button(action: {
-                engine.stop()
-                Task { @MainActor in
-                    try? await Task.sleep(for: .seconds(0.5))
-                    await engine.start()
-                }
-            }) {
-                Text("Restart")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-
-            Button(action: { engine.stop() }) {
-                Text("Stop")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-        }
-    }
-
-    // MARK: - Waiting for Device View
-
-    @ViewBuilder
-    var waitingForDeviceView: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 8) {
-                Image(systemName: "cable.connector")
-                    .font(.title3)
-                    .foregroundStyle(.orange)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Connect your Daylight")
-                        .font(.callout.weight(.medium))
-                    Text("Plug in a USB-C cable to start mirroring automatically")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            Button(action: { engine.stop() }) {
-                Text("Cancel")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-        }
-    }
-
-    // MARK: - Starting View
-
-    @ViewBuilder
-    var startingView: some View {
-        HStack {
-            ProgressView()
-                .controlSize(.small)
-            Text("Creating virtual display...")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    // MARK: - Error View
-
-    @ViewBuilder
-    func errorView(_ message: String) -> some View {
-        Label(message, systemImage: "exclamationmark.triangle")
-            .font(.caption)
-            .foregroundStyle(.red)
-
-        Button(action: { Task { await engine.start() } }) {
-            Text("Retry")
-                .frame(maxWidth: .infinity)
-        }
-        .buttonStyle(.borderedProminent)
-        .controlSize(.small)
-    }
-
-    // MARK: - Idle View
-
-    @ViewBuilder
-    var idleView: some View {
-        VStack(spacing: 8) {
-            // Device detection status
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(engine.deviceDetected ? .green : .gray)
-                    .frame(width: 6, height: 6)
-                Text(engine.deviceDetected ? "DC-1 detected via USB" : "No device connected")
-                    .font(.caption)
-                    .foregroundStyle(engine.deviceDetected ? .primary : .secondary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            Divider()
-
-            // Resolution picker
-            Picker("Resolution", selection: $engine.resolution) {
-                ForEach(DisplayResolution.allCases) { res in
-                    Text("\(res.label) (\(res.rawValue))").tag(res)
-                }
-            }
-            .pickerStyle(.menu)
-            .controlSize(.small)
-            .padding(.vertical, 2)
-
-            Divider()
-
-            Button(action: {
-                if !MirrorEngine.hasScreenRecordingPermission() {
-                    showSetup()
-                } else {
-                    Task { await engine.start() }
-                }
-            }) {
-                Text("Start Mirror")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.regular)
-        }
-    }
-
-    // MARK: - Stats Row
-
-    @ViewBuilder
-    func statsRow(_ label: String, _ value: String) -> some View {
-        HStack {
-            Text(label)
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
-            Spacer()
-            Text(value)
-                .font(.system(size: 10, design: .monospaced))
-                .foregroundStyle(.primary)
-        }
-    }
-
-    // MARK: - Keyboard Shortcut Pills
-
-    @ViewBuilder
-    func shortcutGroup(_ key1: String, _ key2: String, label: String) -> some View {
-        VStack(spacing: 2) {
-            HStack(spacing: 3) {
-                keyPill(key1)
-                keyPill(key2)
-            }
-            Text(label)
-                .font(.system(size: 9))
-                .foregroundStyle(.tertiary)
-        }
-    }
-
-    @ViewBuilder
-    func shortcutPill(_ key: String, label: String) -> some View {
-        VStack(spacing: 2) {
-            keyPill(key)
-            Text(label)
-                .font(.system(size: 9))
-                .foregroundStyle(.tertiary)
-        }
-    }
-
-    @ViewBuilder
-    func keyPill(_ key: String) -> some View {
-        Text(key)
-            .font(.system(size: 9, weight: .medium, design: .rounded))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 5)
-            .padding(.vertical, 2)
-            .background(
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(.quaternary)
-            )
     }
 }
