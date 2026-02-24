@@ -93,7 +93,6 @@ class ScreenCapture: NSObject {
     var frameCount: Int = 0
     var frameSequence: UInt32 = 0
     var skippedFrames: Int = 0
-    var forceNextKeyframe: Bool = false
     var skippedInflight: Int = 0
     var skippedEncoderQueue: Int = 0
     var lastStatTime: Date = Date()
@@ -107,8 +106,6 @@ class ScreenCapture: NSObject {
     var encoderQueueDepth: Int = 0
 
     private let disableSkipBackpressure: Bool = ProcessInfo.processInfo.environment["DAYLIGHT_DISABLE_SKIP_BACKPRESSURE"] == "1"
-    private let enableEncoderQueueBackpressure: Bool = ProcessInfo.processInfo.environment["DAYLIGHT_ENABLE_ENC_QUEUE_BACKPRESSURE"] == "1"
-    private let forceKeyframeOnSkip: Bool = ProcessInfo.processInfo.environment["DAYLIGHT_FORCE_KEYFRAME_ON_SKIP"] != "0"
     private let maxEncoderQueueDepth: Int = {
         guard let raw = ProcessInfo.processInfo.environment["DAYLIGHT_MAX_ENC_QUEUE"],
               let value = Int(raw),
@@ -150,10 +147,7 @@ class ScreenCapture: NSObject {
         try setupEncoder()
 
         print("Capturing display: \(expectedWidth)x\(expectedHeight) pixels (ID: \(targetDisplayID))")
-        let skipMode = disableSkipBackpressure ? "disabled" : "enabled"
-        let encQMode = enableEncoderQueueBackpressure ? "enabled" : "disabled"
-        let keyframeMode = forceKeyframeOnSkip ? "enabled" : "disabled"
-        print("[Capture] backpressure config: skip=\(skipMode) encQ=\(encQMode) maxEncQ=\(maxEncoderQueueDepth) forceKF=\(keyframeMode)")
+        print("[Capture] backpressure config: skip=\(disableSkipBackpressure ? "disabled" : "enabled") maxEncQ=\(maxEncoderQueueDepth)")
 
         guard let cg = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_LAZY) else {
             throw ScreenCaptureError.contentEnumerationFailed(
@@ -334,18 +328,16 @@ class ScreenCapture: NSObject {
         os_unfair_lock_unlock(&encoderLock)
 
         let overInflight = inflight > adaptiveThreshold
-        let overQueue = enableEncoderQueueBackpressure && currentQueueDepth >= maxEncoderQueueDepth
+        let overQueue = currentQueueDepth >= maxEncoderQueueDepth
         if !disableSkipBackpressure && (overInflight || overQueue) && !isScheduledKeyframe {
             skippedFrames += 1
             if overInflight { skippedInflight += 1 }
             if overQueue { skippedEncoderQueue += 1 }
-            if forceKeyframeOnSkip { forceNextKeyframe = true }
             frameCount += 1
             return
         }
 
-        let isKeyframe = isScheduledKeyframe || forceNextKeyframe
-        if forceNextKeyframe { forceNextKeyframe = false }
+        let isKeyframe = isScheduledKeyframe
 
         IOSurfaceLock(surface, .readOnly, nil)
         let iosurfaceObj = unsafeBitCast(surface, to: IOSurface.self)

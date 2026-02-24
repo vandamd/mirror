@@ -33,7 +33,7 @@ class CompositorPacer {
     private let dirtySize: CGFloat = {
         guard let raw = ProcessInfo.processInfo.environment["DAYLIGHT_DIRTY_SIZE"],
               let value = Double(raw),
-              value >= 1 else { return 4 }
+              value >= 1 else { return 32 }
         return CGFloat(value)
     }()
 
@@ -97,7 +97,7 @@ class CompositorPacer {
         if let targetScreen = targetScreen {
             print("[Pacer] Target screen max FPS: \(targetScreen.maximumFramesPerSecond)")
             let dl = targetScreen.displayLink(target: self, selector: #selector(tick))
-            dl.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 120, preferred: Float(TARGET_FPS))
+            dl.preferredFrameRateRange = CAFrameRateRange(minimum: Float(TARGET_FPS), maximum: Float(TARGET_FPS), preferred: Float(TARGET_FPS))
             dl.add(to: .main, forMode: .common)
             self.displayLink = dl
             print("[Pacer] Started on virtual display \(targetDisplayID) (CADisplayLink, \(dirtyLabel), target \(TARGET_FPS)fps)")
