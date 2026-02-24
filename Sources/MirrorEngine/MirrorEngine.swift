@@ -5,7 +5,7 @@
 // monitoring, and the control socket for CLI integration.
 //
 // Used by both the CLI (`daylight-mirror`) and the menu bar app (`DaylightMirror`).
-// All heavy lifting is zero-GPU: vImage SIMD greyscale + LZ4 delta compression.
+// Encoding: VideoToolbox H.264 hardware encode for low-latency streaming.
 //
 // Individual components live in their own files (see Configuration.swift,
 // ADBBridge.swift, ScreenCapture.swift, etc.). This file contains only the
@@ -31,22 +31,22 @@ public class MirrorEngine: ObservableObject {
     @Published public var clientCount: Int = 0
     @Published public var totalFrames: Int = 0
     @Published public var frameSizeKB: Int = 0
-    @Published public var greyMs: Double = 0      // Greyscale + sharpen time per frame
-    @Published public var compressMs: Double = 0   // LZ4 delta compress time per frame
+    @Published public var greyMs: Double = 0      // Image processing time (contrast + sharpen)
+    @Published public var compressMs: Double = 0   // HEVC encode time per frame
     @Published public var jitterMs: Double = 0     // SCStream delivery jitter (deviation from expected interval)
     @Published public var rttMs: Double = 0        // Round-trip latency (Mac send → Android ACK)
     @Published public var rttP95Ms: Double = 0     // 95th percentile RTT
     @Published public var skippedFrames: Int = 0  // Frames skipped due to Android backpressure
     @Published public var sharpenAmount: Double = 1.0 {
         didSet {
-            capture?.sharpenAmount = sharpenAmount
             UserDefaults.standard.set(sharpenAmount, forKey: "sharpenAmount")
+            capture?.setProcessing(contrast: Float(contrastAmount), sharpen: Float(sharpenAmount))
         }
     }
     @Published public var contrastAmount: Double = 1.0 {
         didSet {
-            capture?.contrastAmount = contrastAmount
             UserDefaults.standard.set(contrastAmount, forKey: "contrastAmount")
+            capture?.setProcessing(contrast: Float(contrastAmount), sharpen: Float(sharpenAmount))
         }
     }
     @Published public var fontSmoothingDisabled: Bool = false
@@ -59,8 +59,6 @@ public class MirrorEngine: ObservableObject {
 
     private var displayManager: VirtualDisplayManager?
     private var tcpServer: TCPServer?
-    private var wsServer: WebSocketServer?
-    private var httpServer: HTTPServer?
     private var capture: ScreenCapture?
     private var displayController: DisplayController?
     private var compositorPacer: CompositorPacer?
@@ -80,7 +78,7 @@ public class MirrorEngine: ObservableObject {
         let saved = UserDefaults.standard.string(forKey: "resolution") ?? ""
         self.resolution = DisplayResolution(rawValue: saved) ?? .sharp
         let savedSharpen = UserDefaults.standard.double(forKey: "sharpenAmount")
-        self.sharpenAmount = savedSharpen > 0 ? savedSharpen : 1.0
+        self.sharpenAmount = savedSharpen > 0 ? savedSharpen : 0.0
         let savedContrast = UserDefaults.standard.double(forKey: "contrastAmount")
         self.contrastAmount = savedContrast > 0 ? savedContrast : 1.0
         if UserDefaults.standard.object(forKey: "autoMirrorEnabled") != nil {
@@ -320,13 +318,6 @@ public class MirrorEngine: ObservableObject {
             tcp.start()
             tcpServer = tcp
 
-            let ws = try WebSocketServer(port: WS_PORT)
-            ws.start()
-            wsServer = ws
-
-            let http = try HTTPServer(port: HTTP_PORT, width: w, height: h)
-            http.start()
-            httpServer = http
         } catch {
             status = .error("Server failed: \(error.localizedDescription)")
             displayManager = nil
@@ -344,12 +335,10 @@ public class MirrorEngine: ObservableObject {
 
         // 5. Capture
         let cap = ScreenCapture(
-            tcpServer: tcpServer!, wsServer: wsServer!,
+            tcpServer: tcpServer!,
             targetDisplayID: displayManager!.displayID,
             width: Int(w), height: Int(h)
         )
-        cap.sharpenAmount = sharpenAmount
-        cap.contrastAmount = contrastAmount
         cap.onStats = { [weak self] fps, bw, frameKB, total, grey, compress, jitter, skipped in
             DispatchQueue.main.async {
                 self?.fps = fps
@@ -363,21 +352,22 @@ public class MirrorEngine: ObservableObject {
             }
         }
         capture = cap
+        cap.setProcessing(contrast: Float(contrastAmount), sharpen: Float(sharpenAmount))
 
         do {
             try await cap.start()
         } catch let error as ScreenCaptureError {
             status = .error(error.localizedDescription)
             compositorPacer?.stop(); compositorPacer = nil
-            tcpServer?.stop(); wsServer?.stop(); httpServer?.stop()
-            tcpServer = nil; wsServer = nil; httpServer = nil
+            tcpServer?.stop()
+            tcpServer = nil
             displayManager = nil
             return
         } catch {
             status = .error("Capture failed: \(error.localizedDescription)")
             compositorPacer?.stop(); compositorPacer = nil
-            tcpServer?.stop(); wsServer?.stop(); httpServer?.stop()
-            tcpServer = nil; wsServer = nil; httpServer = nil
+            tcpServer?.stop()
+            tcpServer = nil
             displayManager = nil
             return
         }
@@ -405,8 +395,6 @@ public class MirrorEngine: ObservableObject {
 
         print("---")
         print("Native TCP:  tcp://localhost:\(TCP_PORT)")
-        print("WS fallback: ws://localhost:\(WS_PORT)")
-        print("HTML page:   http://localhost:\(HTTP_PORT)")
         print("Virtual display \(displayManager!.displayID): \(w)x\(h)")
     }
 
@@ -490,11 +478,7 @@ public class MirrorEngine: ObservableObject {
             capture = nil
 
             tcpServer?.stop()
-            wsServer?.stop()
-            httpServer?.stop()
             tcpServer = nil
-            wsServer = nil
-            httpServer = nil
 
             // Virtual display disappears on dealloc, mirroring reverts
             displayManager = nil

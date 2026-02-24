@@ -1,8 +1,8 @@
 // TCPServer.swift — Native TCP frame server for Daylight Mirror.
 //
-// Sends LZ4-compressed greyscale frames to connected Android clients over raw TCP.
-// Protocol: [DA 7E] [flags] [len:4 LE] [payload]. Keyframes are full LZ4, deltas
-// are XOR + LZ4. Also sends resolution and brightness/warmth commands.
+// Sends H.264 Annex B NAL units to connected Android clients over raw TCP.
+// Protocol: [DA 7E] [flags] [seq:4 LE] [len:4 LE] [payload]. Also sends
+// resolution and brightness/warmth commands.
 
 import Foundation
 import Network
@@ -21,7 +21,7 @@ struct LatencyStats {
 class TCPServer {
     let listener: NWListener
     var connections: [NWConnection] = []
-    let queue = DispatchQueue(label: "tcp-server")
+    let queue = DispatchQueue(label: "tcp-server", qos: .userInteractive)
     let lock = NSLock()
     var lastKeyframeData: Data?
     var onClientCountChanged: ((Int) -> Void)?
@@ -52,6 +52,7 @@ class TCPServer {
     private var totalAcks: Int = 0
     private var lastAckStatsTime: Double = CACurrentMediaTime()
     private var _inflightFrames: Int = 0
+    private let verboseRTTLogs: Bool = ProcessInfo.processInfo.environment["DAYLIGHT_VERBOSE_RTT"] == "1"
 
     /// Number of frames sent but not yet ACK'd by Android. Thread-safe (reads rttLock).
     var inflightFrames: Int {
@@ -196,7 +197,7 @@ class TCPServer {
                 ackRate: rate
             )
 
-            if totalAcks % 30 == 0 {
+            if verboseRTTLogs && totalAcks % 30 == 0 {
                 print(String(format: "[RTT] last: %.1fms | avg: %.1fms | p95: %.1fms | min: %.1fms | max: %.1fms | acks: %d",
                              stats.rttMs, stats.rttAvgMs, stats.rttP95Ms, stats.rttMinMs, stats.rttMaxMs, stats.acksReceived))
             }

@@ -62,8 +62,8 @@ final class ConfigurationTests: XCTestCase {
         XCTAssertEqual(DisplayResolution.portraitSharp.height, 1600)
     }
 
-    func testTargetFPSIs60() {
-        XCTAssertEqual(TARGET_FPS, 60)
+    func testTargetFPSIs120() {
+        XCTAssertEqual(TARGET_FPS, 120)
     }
 
     func testTargetFPSDoesNotExceedPanelLimit() {
@@ -138,11 +138,4 @@ final class ConfigurationTests: XCTestCase {
         XCTAssertEqual(adaptiveBackpressureThreshold(rttMs: -5.0), 6)
     }
 
-    // MARK: - Trivial delta threshold
-
-    func testTrivialDeltaThresholdIsReasonable() {
-        XCTAssertGreaterThan(TRIVIAL_DELTA_THRESHOLD, 0)
-        XCTAssertLessThan(TRIVIAL_DELTA_THRESHOLD, 4096,
-            "Threshold should be small enough to only skip near-empty deltas")
-    }
 }

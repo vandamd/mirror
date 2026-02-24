@@ -221,8 +221,8 @@ public class ControlSocket {
 
         case "CONTRAST":
             if let arg = parts.dropFirst().first {
-                guard let val = Double(arg), val >= 1.0, val <= 2.0 else {
-                    return "ERR value must be 1.0-2.0 (1.0=off, 1.5=moderate, 2.0=high)"
+                guard let val = Double(arg), val >= 0.8, val <= 1.5 else {
+                    return "ERR value must be 0.8-1.5 (0.8=muted, 1.0=off, 1.2=moderate, 1.5=high)"
                 }
                 engine.contrastAmount = val
                 return "OK \(String(format: "%.1f", val))"
