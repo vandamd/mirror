@@ -94,6 +94,8 @@ class ScreenCapture: NSObject {
     var frameSequence: UInt32 = 0
     var skippedFrames: Int = 0
     var forceNextKeyframe: Bool = false
+    var skippedInflight: Int = 0
+    var skippedEncoderQueue: Int = 0
     var lastStatTime: Date = Date()
     var convertTimeSum: Double = 0
     var compressTimeSum: Double = 0
@@ -103,7 +105,16 @@ class ScreenCapture: NSObject {
     var lastBackpressureThreshold: Int = 0
     var lastRTTMs: Double = 0
     var encoderQueueDepth: Int = 0
-    let maxEncoderQueueDepth = 3
+
+    private let disableSkipBackpressure: Bool = ProcessInfo.processInfo.environment["DAYLIGHT_DISABLE_SKIP_BACKPRESSURE"] == "1"
+    private let enableEncoderQueueBackpressure: Bool = ProcessInfo.processInfo.environment["DAYLIGHT_ENABLE_ENC_QUEUE_BACKPRESSURE"] == "1"
+    private let forceKeyframeOnSkip: Bool = ProcessInfo.processInfo.environment["DAYLIGHT_FORCE_KEYFRAME_ON_SKIP"] != "0"
+    private let maxEncoderQueueDepth: Int = {
+        guard let raw = ProcessInfo.processInfo.environment["DAYLIGHT_MAX_ENC_QUEUE"],
+              let value = Int(raw),
+              value > 0 else { return 3 }
+        return value
+    }()
 
     var jitterSamples: [Double] = []
     var lastCallbackTime: Double = 0
@@ -139,6 +150,10 @@ class ScreenCapture: NSObject {
         try setupEncoder()
 
         print("Capturing display: \(expectedWidth)x\(expectedHeight) pixels (ID: \(targetDisplayID))")
+        let skipMode = disableSkipBackpressure ? "disabled" : "enabled"
+        let encQMode = enableEncoderQueueBackpressure ? "enabled" : "disabled"
+        let keyframeMode = forceKeyframeOnSkip ? "enabled" : "disabled"
+        print("[Capture] backpressure config: skip=\(skipMode) encQ=\(encQMode) maxEncQ=\(maxEncoderQueueDepth) forceKF=\(keyframeMode)")
 
         guard let cg = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_LAZY) else {
             throw ScreenCaptureError.contentEnumerationFailed(
@@ -159,10 +174,15 @@ class ScreenCapture: NSObject {
         let createFn = unsafeBitCast(createSym, to: CGDisplayStreamCreateFn.self)
         let startFn  = unsafeBitCast(startSym,  to: CGDisplayStreamStartFn.self)
 
-        let properties: NSDictionary = [
-            "kCGDisplayStreamMinimumFrameTime": NSNumber(value: 1.0 / Double(TARGET_FPS)),
+        var properties: [String: Any] = [
             "kCGDisplayStreamShowCursor": kCFBooleanTrue as Any
         ]
+        if ProcessInfo.processInfo.environment["DAYLIGHT_ENABLE_CAPTURE_MIN_FRAME_TIME"] == "1" {
+            properties["kCGDisplayStreamMinimumFrameTime"] = NSNumber(value: 1.0 / Double(TARGET_FPS))
+            print("[Capture] CGDisplayStream minimumFrameTime enabled")
+        } else {
+            print("[Capture] CGDisplayStream minimumFrameTime disabled")
+        }
 
         let captureQueue = DispatchQueue(label: "capture", qos: .userInteractive)
         let pixelFormat: Int32 = 1111970369  // kCVPixelFormatType_32BGRA
@@ -263,7 +283,9 @@ class ScreenCapture: NSObject {
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel,
                              value: kVTProfileLevel_HEVC_Main_AutoLevel)
-        let bitrate = Int(Double(frameWidth * frameHeight * TARGET_FPS) * ENCODER_BPP)
+        let envBpp = ProcessInfo.processInfo.environment["DAYLIGHT_ENCODER_BPP"].flatMap(Double.init)
+        let encoderBpp = (envBpp ?? ENCODER_BPP)
+        let bitrate = Int(Double(frameWidth * frameHeight * TARGET_FPS) * encoderBpp)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate,
                              value: bitrate as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
@@ -273,12 +295,11 @@ class ScreenCapture: NSObject {
                              value: keyframeSeconds as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate,
                              value: TARGET_FPS as CFNumber)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount,
-                             value: 0 as CFNumber)
 
         VTCompressionSessionPrepareToEncodeFrames(session)
         vtSession = session
-        print("VideoToolbox HEVC encoder ready: \(frameWidth)x\(frameHeight) @ \(bitrate/1_000_000)Mbps")
+        print(String(format: "VideoToolbox HEVC encoder ready: %dx%d @ %dMbps (bpp=%.3f)",
+                     frameWidth, frameHeight, bitrate / 1_000_000, encoderBpp))
     }
 
     // MARK: - Frame callback
@@ -299,7 +320,7 @@ class ScreenCapture: NSObject {
         }
         lastCallbackTime = t0
 
-        // Backpressure: drop frames when Android can't keep up or encoder queue is full
+        // Backpressure: drop frames when Android can't keep up or encoder queue is full.
         let inflight = tcpServer.inflightFrames
         let isScheduledKeyframe = (frameCount % KEYFRAME_INTERVAL == 0)
         let rtt = tcpServer.latencyStats?.rttAvgMs ?? 15.0
@@ -311,10 +332,14 @@ class ScreenCapture: NSObject {
         os_unfair_lock_lock(&encoderLock)
         let currentQueueDepth = encoderQueueDepth
         os_unfair_lock_unlock(&encoderLock)
-        
-        if (inflight > adaptiveThreshold || currentQueueDepth >= maxEncoderQueueDepth) && !isScheduledKeyframe {
+
+        let overInflight = inflight > adaptiveThreshold
+        let overQueue = enableEncoderQueueBackpressure && currentQueueDepth >= maxEncoderQueueDepth
+        if !disableSkipBackpressure && (overInflight || overQueue) && !isScheduledKeyframe {
             skippedFrames += 1
-            forceNextKeyframe = true
+            if overInflight { skippedInflight += 1 }
+            if overQueue { skippedEncoderQueue += 1 }
+            if forceKeyframeOnSkip { forceNextKeyframe = true }
             frameCount += 1
             return
         }
@@ -388,10 +413,10 @@ class ScreenCapture: NSObject {
             let bw = Double(currentCompressedSize) * fps / 1024 / 1024
             let avgJitter = jitterSamples.isEmpty ? 0.0 : jitterSamples.reduce(0, +) / Double(jitterSamples.count)
 
-            print(String(format: "FPS: %.1f | process: %.2fms | encode: %.1fms | jitter: %.1fms | inflight: %d/%d | encQ: %d | rtt: %.1fms | frame: %dKB | ~%.1fMB/s | total: %d | skipped: %d",
+            print(String(format: "FPS: %.1f | process: %.2fms | encode: %.1fms | jitter: %.1fms | inflight: %d/%d | encQ: %d | rtt: %.1fms | frame: %dKB | ~%.1fMB/s | total: %d | skipped: %d (I:%d Q:%d)",
                          fps, avgProcess, avgCompress, avgJitter,
                          lastInflightFrames, lastBackpressureThreshold, currentQueueDepth, lastRTTMs,
-                         currentCompressedSize / 1024, bw, frameCount, skippedFrames))
+                         currentCompressedSize / 1024, bw, frameCount, skippedFrames, skippedInflight, skippedEncoderQueue))
             onStats?(fps, bw, currentCompressedSize / 1024, frameCount, avgProcess, avgCompress, avgJitter, skippedFrames)
 
             statFrames = 0

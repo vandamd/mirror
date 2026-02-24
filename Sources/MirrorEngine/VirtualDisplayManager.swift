@@ -14,6 +14,14 @@ class VirtualDisplayManager {
     let width: UInt
     let height: UInt
 
+    private func modeDescription(for display: CGDirectDisplayID) -> String {
+        guard let mode = CGDisplayCopyDisplayMode(display) else {
+            return "unknown mode"
+        }
+        let refresh = mode.refreshRate
+        return String(format: "%dx%d @ %.2fHz", mode.pixelWidth, mode.pixelHeight, refresh)
+    }
+
     init(width: UInt, height: UInt, hiDPI: Bool = false) {
         self.width = width
         self.height = height
@@ -47,6 +55,7 @@ class VirtualDisplayManager {
         }
         let modeLabel = hiDPI ? "HiDPI (\(width/2)x\(height/2)pt @ 2x)" : "non-HiDPI"
         print("Virtual display configured: \(width)x\(height) \(modeLabel) @ 120Hz")
+        print("Virtual display active mode: \(modeDescription(for: displayID))")
     }
 
     func mirrorBuiltInDisplay() {
@@ -85,5 +94,7 @@ class VirtualDisplayManager {
         }
 
         print("Mirroring: built-in display \(masterID) -> virtual display \(displayID)")
+        print("Built-in active mode: \(modeDescription(for: masterID))")
+        print("Virtual active mode after mirror: \(modeDescription(for: displayID))")
     }
 }

@@ -30,6 +30,12 @@ class CompositorPacer {
     private var tickGapSumMs: Double = 0
     private var tickGapMaxMs: Double = 0
     private var tickOverruns: UInt64 = 0
+    private let dirtySize: CGFloat = {
+        guard let raw = ProcessInfo.processInfo.environment["DAYLIGHT_DIRTY_SIZE"],
+              let value = Double(raw),
+              value >= 1 else { return 4 }
+        return CGFloat(value)
+    }()
 
     init(targetDisplayID: CGDirectDisplayID) {
         self.targetDisplayID = targetDisplayID
@@ -61,9 +67,12 @@ class CompositorPacer {
         // Avoid AppKit window tab indexing/background bookkeeping work.
         NSWindow.allowsAutomaticWindowTabbing = false
 
-        // 4x4 dirty region — above any per-pixel compositing threshold
+        let dirtySize = self.dirtySize
+        let dirtyLabel = "\(Int(dirtySize))x\(Int(dirtySize))"
+
+        // Dirty region to force compositing every frame.
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 4, height: 4),
+            contentRect: NSRect(x: 0, y: 0, width: dirtySize, height: dirtySize),
             styleMask: .borderless,
             backing: .buffered,
             defer: false
@@ -78,7 +87,7 @@ class CompositorPacer {
 
         // Position at top-left corner of the target screen
         if let s = screen {
-            window.setFrameOrigin(NSPoint(x: s.frame.minX, y: s.frame.maxY - 4))
+            window.setFrameOrigin(NSPoint(x: s.frame.minX, y: s.frame.maxY - dirtySize))
         }
         window.orderFrontRegardless()
         self.window = window
@@ -86,11 +95,12 @@ class CompositorPacer {
         // Use CADisplayLink from the target screen for vsync-aligned ticking.
         // If virtual display has no NSScreen (mirror mode), use a timer.
         if let targetScreen = targetScreen {
+            print("[Pacer] Target screen max FPS: \(targetScreen.maximumFramesPerSecond)")
             let dl = targetScreen.displayLink(target: self, selector: #selector(tick))
             dl.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 120, preferred: Float(TARGET_FPS))
             dl.add(to: .main, forMode: .common)
             self.displayLink = dl
-            print("[Pacer] Started on virtual display \(targetDisplayID) (CADisplayLink, 4x4, target \(TARGET_FPS)fps)")
+            print("[Pacer] Started on virtual display \(targetDisplayID) (CADisplayLink, \(dirtyLabel), target \(TARGET_FPS)fps)")
         } else {
             // Fallback: DispatchSourceTimer
             let t = DispatchSource.makeTimerSource(queue: .main)
@@ -101,7 +111,7 @@ class CompositorPacer {
             }
             t.resume()
             self.timer = t
-            print("[Pacer] Started on main screen (timer fallback, 4x4, target \(TARGET_FPS)fps) — virtual display \(targetDisplayID) has no NSScreen")
+            print("[Pacer] Started on main screen (timer fallback, \(dirtyLabel), target \(TARGET_FPS)fps) — virtual display \(targetDisplayID) has no NSScreen")
         }
 
         print("[Pacer] Target display: \(targetDisplayID), on virtual screen: \(onVirtual)")
