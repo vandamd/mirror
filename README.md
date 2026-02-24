@@ -132,7 +132,6 @@ daylight-mirror brightness 200       # set brightness (0-255)
 daylight-mirror warmth 128           # set warmth / amber rate (0-255)
 daylight-mirror backlight toggle     # toggle backlight (on|off|toggle)
 daylight-mirror resolution sharp     # set resolution (cozy|comfortable|balanced|sharp)
-daylight-mirror sharpen 0.8          # set sharpening amount (0.0-1.5)
 daylight-mirror restart              # full stop + start cycle
 ```
 

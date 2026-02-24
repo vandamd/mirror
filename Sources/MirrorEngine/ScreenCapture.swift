@@ -75,11 +75,6 @@ class ScreenCapture: NSObject {
     let targetDisplayID: CGDirectDisplayID
     
     var imageProcessor: ImageProcessor?
-    
-    func setProcessing(contrast: Float, sharpen: Float) {
-        imageProcessor?.contrast = contrast
-        imageProcessor?.sharpen = sharpen
-    }
 
     // CGDisplayStream runtime handles
     private var cgHandle: UnsafeMutableRawPointer?
@@ -131,10 +126,6 @@ class ScreenCapture: NSObject {
         self.ciContext = CIContext(options: [.useSoftwareRenderer: false])
         super.init()
         self.imageProcessor = ImageProcessor()
-        if let processor = imageProcessor {
-            processor.contrast = CONTRAST_AMOUNT
-            processor.sharpen = SHARPEN_AMOUNT
-        }
     }
 
     func start() async throws {

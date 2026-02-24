@@ -8,16 +8,7 @@ import Foundation
 let TCP_PORT: UInt16 = 8888
 let TARGET_FPS: Int = 120  // DC-1 panel supports up to 120Hz
 let ENCODER_BPP: Double = 0.45  // HEVC with preprocessing - balance quality vs bandwidth
-let CONTRAST_AMOUNT: Float = 1.0  // 1.0 = no change
-let SHARPEN_AMOUNT: Float = 0.0  // 0 = off, was too aggressive
 let KEYFRAME_INTERVAL: Int = 120
-
-
-// Image processing for e-ink/greyscale displays.
-// macOS font smoothing produces subpixel-antialiased text that looks fuzzy when
-// converted to greyscale. Two independent post-processing knobs counteract this:
-//   sharpenAmount (0.0-3.0): spatial sharpening via Laplacian kernel
-//   contrastAmount (1.0-2.0): linear contrast stretch around midpoint
 
 // Resolution presets matching Daylight DC-1's native 1600x1200 panel.
 // Landscape presets are 4:3. Portrait presets are 3:4 (1200x1600 native).

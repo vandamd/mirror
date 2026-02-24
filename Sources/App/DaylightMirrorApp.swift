@@ -557,7 +557,7 @@ struct MirrorMenuView: View {
                 statsRow("Resolution", "\(engine.resolution.rawValue)\(engine.resolution.isHiDPI ? " HiDPI" : "")")
                 statsRow("Frame size", "\(engine.frameSizeKB) KB")
                 statsRow("Total frames", "\(engine.totalFrames)")
-                statsRow("Grey + sharpen", String(format: "%.1f ms", engine.greyMs))
+                statsRow("Process", String(format: "%.1f ms", engine.greyMs))
                 statsRow("LZ4 compress", String(format: "%.1f ms", engine.compressMs))
                 statsRow("Frame budget", String(format: "%.0f%%", (engine.greyMs + engine.compressMs) / (1000.0 / 60.0) * 100))
             }
@@ -658,49 +658,6 @@ struct MirrorMenuView: View {
         }
         .toggleStyle(.switch)
         .controlSize(.small)
-
-        Divider()
-
-        // Sharpening slider (0-1.5)
-        VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Image(systemName: "circle.dashed")
-                    .font(.caption2)
-                Slider(
-                    value: Binding(
-                        get: { engine.sharpenAmount },
-                        set: { engine.sharpenAmount = $0 }
-                    ),
-                    in: 0...1.5,
-                    step: 0.1
-                )
-                Image(systemName: "diamond")
-                    .font(.caption2)
-            }
-            Text("Sharpen: \(String(format: "%.1f", engine.sharpenAmount))")
-                .font(.system(size: 9))
-                .foregroundStyle(.tertiary)
-        }
-
-        VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Image(systemName: "circle.lefthalf.filled")
-                    .font(.caption2)
-                Slider(
-                    value: Binding(
-                        get: { engine.contrastAmount },
-                        set: { engine.contrastAmount = $0 }
-                    ),
-                    in: 0.8...1.5,
-                    step: 0.05
-                )
-                Image(systemName: "circle.righthalf.filled")
-                    .font(.caption2)
-            }
-            Text("Contrast: \(String(format: "%.2f", engine.contrastAmount))")
-                .font(.system(size: 9))
-                .foregroundStyle(.tertiary)
-        }
 
         Divider()
 

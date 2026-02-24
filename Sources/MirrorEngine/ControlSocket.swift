@@ -208,28 +208,6 @@ public class ControlSocket {
                 return "ERR not running"
             }
 
-        case "SHARPEN":
-            if let arg = parts.dropFirst().first {
-                guard let val = Double(arg), val >= 0, val <= 3.0 else {
-                    return "ERR value must be 0.0-3.0 (0=none, 1=mild, 2=strong)"
-                }
-                engine.sharpenAmount = val
-                return "OK \(String(format: "%.1f", val))"
-            } else {
-                return "OK \(String(format: "%.1f", engine.sharpenAmount))"
-            }
-
-        case "CONTRAST":
-            if let arg = parts.dropFirst().first {
-                guard let val = Double(arg), val >= 0.8, val <= 1.5 else {
-                    return "ERR value must be 0.8-1.5 (0.8=muted, 1.0=off, 1.2=moderate, 1.5=high)"
-                }
-                engine.contrastAmount = val
-                return "OK \(String(format: "%.1f", val))"
-            } else {
-                return "OK \(String(format: "%.1f", engine.contrastAmount))"
-            }
-
         case "FONTSMOOTHING":
             if let arg = parts.dropFirst().first?.lowercased() {
                 switch arg {

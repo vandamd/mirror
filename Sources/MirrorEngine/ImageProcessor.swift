@@ -6,9 +6,6 @@ import Metal
 class ImageProcessor {
     let ciContext: CIContext
     
-    var contrast: Float = 1.0
-    var sharpen: Float = 0.0
-    
     private var bufferPool: CVPixelBufferPool?
     private var poolWidth: Int = 0
     private var poolHeight: Int = 0
@@ -63,20 +60,6 @@ class ImageProcessor {
         processed = processed.applyingFilter("CIColorControls", parameters: [
             kCIInputSaturationKey: 0.0
         ])
-        
-        // 2. Contrast enhancement
-        if contrast != 1.0 {
-            processed = processed.applyingFilter("CIColorControls", parameters: [
-                kCIInputContrastKey: NSNumber(value: contrast)
-            ])
-        }
-        
-        // 3. Sharpen (unsharp mask)
-        if sharpen > 0 {
-            processed = processed.applyingFilter("CISharpenLuminance", parameters: [
-                kCIInputSharpnessKey: NSNumber(value: sharpen * 0.5)
-            ])
-        }
         
         let width = IOSurfaceGetWidth(surface)
         let height = IOSurfaceGetHeight(surface)

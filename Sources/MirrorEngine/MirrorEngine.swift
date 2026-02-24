@@ -31,24 +31,12 @@ public class MirrorEngine: ObservableObject {
     @Published public var clientCount: Int = 0
     @Published public var totalFrames: Int = 0
     @Published public var frameSizeKB: Int = 0
-    @Published public var greyMs: Double = 0      // Image processing time (contrast + sharpen)
+    @Published public var greyMs: Double = 0      // Image processing time
     @Published public var compressMs: Double = 0   // HEVC encode time per frame
     @Published public var jitterMs: Double = 0     // SCStream delivery jitter (deviation from expected interval)
     @Published public var rttMs: Double = 0        // Round-trip latency (Mac send → Android ACK)
     @Published public var rttP95Ms: Double = 0     // 95th percentile RTT
     @Published public var skippedFrames: Int = 0  // Frames skipped due to Android backpressure
-    @Published public var sharpenAmount: Double = 1.0 {
-        didSet {
-            UserDefaults.standard.set(sharpenAmount, forKey: "sharpenAmount")
-            capture?.setProcessing(contrast: Float(contrastAmount), sharpen: Float(sharpenAmount))
-        }
-    }
-    @Published public var contrastAmount: Double = 1.0 {
-        didSet {
-            UserDefaults.standard.set(contrastAmount, forKey: "contrastAmount")
-            capture?.setProcessing(contrast: Float(contrastAmount), sharpen: Float(sharpenAmount))
-        }
-    }
     @Published public var fontSmoothingDisabled: Bool = false
     @Published public var deviceDetected: Bool = false
     @Published public var updateVersion: String? = nil
@@ -77,18 +65,14 @@ public class MirrorEngine: ObservableObject {
     public init() {
         let saved = UserDefaults.standard.string(forKey: "resolution") ?? ""
         self.resolution = DisplayResolution(rawValue: saved) ?? .sharp
-        let savedSharpen = UserDefaults.standard.double(forKey: "sharpenAmount")
-        self.sharpenAmount = savedSharpen > 0 ? savedSharpen : 0.0
-        let savedContrast = UserDefaults.standard.double(forKey: "contrastAmount")
-        self.contrastAmount = savedContrast > 0 ? savedContrast : 1.0
         if UserDefaults.standard.object(forKey: "autoMirrorEnabled") != nil {
             self.autoMirrorEnabled = UserDefaults.standard.bool(forKey: "autoMirrorEnabled")
         }
         if UserDefaults.standard.object(forKey: "autoDimMac") != nil {
             self.autoDimMac = UserDefaults.standard.bool(forKey: "autoDimMac")
         }
-        NSLog("[MirrorEngine] init, resolution: %@, sharpen: %.1f, contrast: %.1f",
-              resolution.rawValue, sharpenAmount, contrastAmount)
+        NSLog("[MirrorEngine] init, resolution: %@",
+              resolution.rawValue)
 
         // Control socket — always listening so CLI can send START/STOP/etc.
         // Started after init completes (self is fully initialized).
@@ -352,8 +336,6 @@ public class MirrorEngine: ObservableObject {
             }
         }
         capture = cap
-        cap.setProcessing(contrast: Float(contrastAmount), sharpen: Float(sharpenAmount))
-
         do {
             try await cap.start()
         } catch let error as ScreenCaptureError {
