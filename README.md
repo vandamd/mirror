@@ -150,12 +150,6 @@ What you see above is the Daylight rendering this README, mirrored from the Mac.
 
 This entire project was vibecoded in a single session with Claude Opus 4.6. Starting from "can I mirror my Mac to this tablet?", we iterated through VNC, Python scripts, browser-based streaming, and native rendering — each version dramatically faster than the last — until we hit the physical limits of what a software mirror can do. The result is 10x better than any existing solution for the DC-1: faster, sharper, lighter, and easier to use.
 
-The blog series tells the full story:
-
-- [Part 1: The Prototype](blog/part-1-from-vnc-to-raw-pixels.md) — from VNC to ScreenCaptureKit
-- [Part 2: Killing the GPU](blog/part-2-killing-the-gpu.md) — zero-GPU pipeline, native Android renderer with ARM SIMD
-- [Part 3: One Click](blog/part-3-one-click.md) — virtual display, display controls, menu bar app
-
 ## Get a Daylight DC-1
 
 Don't have one yet? Use code **WELF** at [buy.daylightcomputer.com/WELF](https://buy.daylightcomputer.com/WELF).

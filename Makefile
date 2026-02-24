@@ -21,7 +21,7 @@ APK := android/app/build/outputs/apk/debug/app-debug.apk
 PLATFORM_TOOLS_DIR := tools/platform-tools
 ADB_BINARY := $(PLATFORM_TOOLS_DIR)/adb
 
-.PHONY: mac android install deploy run clean test fetch-adb lab-dry lab-run lab-run-android lab-analyze lab-scenario
+.PHONY: mac android install deploy run clean test fetch-adb
 
 # Build Mac menu bar app
 mac:
@@ -115,23 +115,3 @@ clean:
 	swift package clean
 	rm -rf "$(APP_BUNDLE)"
 	@echo "Cleaned"
-
-# ── Latency Lab ──────────────────────────────────────────────
-
-LAB_PLAN ?= experiments/plan.example.json
-
-lab-dry:
-	python3 scripts/latency_lab.py --plan "$(LAB_PLAN)" --dry-run
-
-lab-run:
-	python3 scripts/latency_lab.py --plan "$(LAB_PLAN)"
-
-lab-run-android:
-	python3 scripts/latency_lab.py --plan "$(LAB_PLAN)" --android
-
-lab-analyze:
-	python3 scripts/lab_analyze.py
-
-LAB_SCENARIO ?= full
-lab-scenario:
-	python3 scripts/lab_scenario.py --scenario "$(LAB_SCENARIO)"
